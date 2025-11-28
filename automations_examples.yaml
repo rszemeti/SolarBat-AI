@@ -1,0 +1,249 @@
+# Example Automations for Battery Optimizer
+# Copy these to your Home Assistant automations.yaml
+# Adjust entity IDs to match your battery system
+
+# =============================================================================
+# 1. Execute Battery Actions
+# =============================================================================
+# This automation reads the optimizer's recommendations and controls your battery
+
+automation:
+  - id: battery_optimizer_execute
+    alias: "Battery Optimizer - Execute Actions"
+    description: "Execute battery charge/discharge based on optimizer"
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"  # Every 30 minutes
+
+      # Also trigger on action changes
+      - platform: state
+        entity_id: sensor.battery_optimizer
+
+    action:
+      - variables:
+          action: "{{ states('sensor.battery_optimizer') }}"
+          power: "{{ state_attr('sensor.battery_optimizer', 'target_power_kw') | float }}"
+
+      # Log the action
+      - service: system_log.write
+        data:
+          message: "Battery Optimizer: {{ action }} @ {{ power }}kW"
+          level: info
+
+      - choose:
+          # ===== CHARGE =====
+          - conditions:
+              - "{{ action == 'charge' }}"
+            sequence:
+              # Example for GivEnergy/Solis - adjust for your system
+              - service: number.set_value
+                target:
+                  entity_id: number.battery_charge_current  # YOUR ENTITY
+                data:
+                  value: "{{ (power * 1000 / 48) | int }}"  # kW to Amps
+
+              - service: select.select_option
+                target:
+                  entity_id: select.battery_mode  # YOUR ENTITY
+                data:
+                  option: "Charge"
+
+          # ===== DISCHARGE =====
+          - conditions:
+              - "{{ action == 'discharge' }}"
+            sequence:
+              - service: number.set_value
+                target:
+                  entity_id: number.battery_discharge_current  # YOUR ENTITY
+                data:
+                  value: "{{ (power * 1000 / 48) | int }}"
+
+              - service: select.select_option
+                target:
+                  entity_id: select.battery_mode  # YOUR ENTITY
+                data:
+                  option: "Discharge"
+
+          # ===== HOLD =====
+          - conditions:
+              - "{{ action == 'hold' }}"
+            sequence:
+              - service: select.select_option
+                target:
+                  entity_id: select.battery_mode  # YOUR ENTITY
+                data:
+                  option: "Self Use"  # Or "Eco" depending on your system
+
+# =============================================================================
+# 2. Alert Before High Rate Period
+# =============================================================================
+  - id: battery_optimizer_high_rate_alert
+    alias: "Alert - High Rate Period Coming"
+    description: "Notify before expensive electricity period"
+    trigger:
+      - platform: state
+        entity_id: sensor.battery_optimizer
+        attribute: next_action_changes
+
+    condition:
+      - condition: template
+        value_template: >
+          {% set changes = state_attr('sensor.battery_optimizer', 'next_action_changes') %}
+          {{ changes | length > 0 and changes[0].action == 'discharge' }}
+
+    action:
+      - service: notify.mobile_app_your_phone  # YOUR NOTIFY SERVICE
+        data:
+          title: "⚡ Peak Rate Period Soon"
+          message: >
+            High rates starting at {{ state_attr('sensor.battery_optimizer', 'next_action_changes')[0].time[:5] }}.
+            Battery will discharge to save costs.
+
+# =============================================================================
+# 3. Alert When Optimization Fails
+# =============================================================================
+  - id: battery_optimizer_failure_alert
+    alias: "Alert - Optimization Failed"
+    description: "Notify if optimization fails"
+    trigger:
+      - platform: state
+        entity_id: sensor.battery_optimizer
+        attribute: optimization_status
+        to: "fallback"
+
+    action:
+      - service: notify.mobile_app_your_phone  # YOUR NOTIFY SERVICE
+        data:
+          title: "⚠️ Battery Optimization Failed"
+          message: "Optimizer is using fallback mode. Check logs."
+
+# =============================================================================
+# 4. Smart EV Charging
+# =============================================================================
+  - id: ev_charging_cheap_rates
+    alias: "EV Charging - Optimal Times Only"
+    description: "Only charge EV during cheap rate periods"
+    trigger:
+      - platform: state
+        entity_id: sensor.battery_optimizer
+
+      - platform: time_pattern
+        minutes: "/30"
+
+    condition:
+      # EV needs charging
+      - condition: numeric_state
+        entity_id: sensor.ev_battery_level  # YOUR EV SENSOR
+        below: 80
+
+      # Car is plugged in
+      - condition: state
+        entity_id: binary_sensor.ev_charger_connected  # YOUR SENSOR
+        state: "on"
+
+      # Current rate is cheap (below 10p)
+      - condition: template
+        value_template: >
+          {% set schedule = state_attr('sensor.battery_optimizer', 'schedule') %}
+          {% if schedule and schedule | length > 0 %}
+            {{ schedule[0].import_rate_p < 10 }}
+          {% else %}
+            false
+          {% endif %}
+
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.ev_charger  # YOUR CHARGER SWITCH
+
+  - id: ev_charging_stop_expensive
+    alias: "EV Charging - Stop During Expensive Rates"
+    description: "Stop EV charging during expensive periods"
+    trigger:
+      - platform: state
+        entity_id: sensor.battery_optimizer
+
+      - platform: time_pattern
+        minutes: "/30"
+
+    condition:
+      # Charger is on
+      - condition: state
+        entity_id: switch.ev_charger  # YOUR CHARGER
+        state: "on"
+
+      # Rate is expensive (above 15p)
+      - condition: template
+        value_template: >
+          {% set schedule = state_attr('sensor.battery_optimizer', 'schedule') %}
+          {% if schedule and schedule | length > 0 %}
+            {{ schedule[0].import_rate_p > 15 }}
+          {% else %}
+            false
+          {% endif %}
+
+    action:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.ev_charger  # YOUR CHARGER
+
+# =============================================================================
+# 5. Daily Cost Report
+# =============================================================================
+  - id: battery_optimizer_daily_report
+    alias: "Battery Optimizer - Daily Cost Report"
+    description: "Send daily cost forecast"
+    trigger:
+      - platform: time
+        at: "07:00:00"
+
+    action:
+      - service: notify.mobile_app_your_phone  # YOUR NOTIFY SERVICE
+        data:
+          title: "📊 Energy Cost Forecast"
+          message: >
+            Predicted cost today: {{ states('sensor.energy_cost_predictor') }}
+
+            Import: £{{ state_attr('sensor.energy_cost_predictor', 'import_cost_48h') }}
+            Export: £{{ state_attr('sensor.energy_cost_predictor', 'export_revenue_48h') }}
+
+            Solar expected: {{ state_attr('sensor.solar_predictor', 'total_48h_kwh') }} kWh
+
+# =============================================================================
+# 6. Retrain Model Weekly
+# =============================================================================
+  - id: battery_optimizer_weekly_training
+    alias: "Battery Optimizer - Weekly Model Training"
+    description: "Retrain ML model weekly with new data"
+    trigger:
+      - platform: time
+        at: "03:00:00"
+
+    condition:
+      - condition: time
+        weekday:
+          - mon
+
+    action:
+      - service: rest_command.train_energy_model  # See rest_command below
+
+# =============================================================================
+# REST Commands (add to configuration.yaml)
+# =============================================================================
+# rest_command:
+#   train_energy_model:
+#     url: "http://localhost:8099/api/train"
+#     method: POST
+#
+#   optimize_battery:
+#     url: "http://localhost:8099/api/optimize"
+#     method: POST
+
+# =============================================================================
+# Notes:
+# =============================================================================
+# 1. Replace all "YOUR ENTITY" comments with your actual entity IDs
+# 2. Adjust timing and thresholds to your preferences
+# 3. Test automations individually before enabling all
+# 4. Monitor logs to ensure correct operation
+# 5. Adjust battery control commands for your specific inverter type

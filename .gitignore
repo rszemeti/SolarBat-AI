@@ -1,0 +1,12 @@
+*.pyc
+__pycache__/
+*.pkl
+*.joblib
+.DS_Store
+*.log
+data/
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

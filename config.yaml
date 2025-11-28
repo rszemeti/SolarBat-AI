@@ -1,0 +1,83 @@
+name: "Energy Demand Predictor & Battery Optimizer"
+version: "1.0.0"
+slug: energy_demand_predictor
+description: "AI-powered energy demand prediction, solar forecasting, and battery optimization for cost savings"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: application
+boot: auto
+init: false
+hassio_api: true
+hassio_role: default
+homeassistant_api: true
+
+options:
+  # Energy sensor
+  entity_id: sensor.house_load
+  prediction_slots: 96
+  max_training_days: 30
+  api_port: 8099
+  auto_update_interval: 3600
+
+  # Octopus Energy
+  enable_octopus_integration: true
+  octopus_import_rate_entity: ""
+  octopus_export_rate_entity: ""
+
+  # Solar
+  solar_forecast_provider: solcast
+  solcast_forecast_entity: sensor.solcast_pv_forecast_forecast_today
+  solar_forecast_mode: estimate
+
+  # Battery
+  battery_capacity_kwh: 9.5
+  battery_min_soc: 0.1
+  battery_reserve_soc: 0.2
+  max_charge_rate_kw: 3.6
+  max_discharge_rate_kw: 3.6
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+  battery_degradation_cost_per_cycle: 0.05
+  battery_soc_entity: sensor.battery_soc
+
+  # Grid
+  allow_grid_export: true
+  max_export_rate_kw: 5.0
+
+schema:
+  entity_id: str
+  prediction_slots: int(48,192)
+  max_training_days: int(7,90)
+  api_port: port
+  auto_update_interval: int(300,7200)
+
+  enable_octopus_integration: bool
+  octopus_import_rate_entity: str?
+  octopus_export_rate_entity: str?
+
+  solar_forecast_provider: list(none|solcast|forecast.solar)
+  solcast_forecast_entity: str?
+  solar_forecast_mode: list(estimate|estimate10|estimate90)
+
+  battery_capacity_kwh: float(1.0,100.0)
+  battery_min_soc: float(0.0,0.5)
+  battery_reserve_soc: float(0.0,1.0)
+  max_charge_rate_kw: float(0.5,20.0)
+  max_discharge_rate_kw: float(0.5,20.0)
+  charge_efficiency: float(0.5,1.0)
+  discharge_efficiency: float(0.5,1.0)
+  battery_degradation_cost_per_cycle: float(0.0,1.0)
+  battery_soc_entity: str?
+
+  allow_grid_export: bool
+  max_export_rate_kw: float(0.0,50.0)
+
+ports:
+  8099/tcp: 8099
+
+ports_description:
+  8099/tcp: "Web UI and API"
