@@ -1,78 +1,143 @@
-# Energy Demand Predictor & Battery Optimizer
+# Home Assistant Solar Integration
 
-A complete AI-powered energy management system for Home Assistant that predicts energy demand, forecasts solar generation, and optimizes battery charge/discharge schedules to minimize costs.
+Complete AI-powered energy management system for Home Assistant with solar power and battery optimization.
 
-## 🎯 What This System Does
+## 📂 Repository Contents
 
-- **Predicts energy demand** for next 48 hours using machine learning
-- **Forecasts solar generation** via Solcast integration
-- **Fetches dynamic tariffs** from Octopus Energy
-- **Optimizes battery** charge/discharge schedule using linear programming
-- **Minimizes costs** by buying low, selling high
-- **Maximizes solar self-consumption**
+### `/energy_demand_predictor/`
 
-**Expected Savings: £8-15 per day** vs unoptimized usage!
+Complete Home Assistant add-on for energy demand prediction and battery optimization.
 
-## 📋 Prerequisites
+**Features:**
+- 🤖 ML-based energy demand prediction (48 hours ahead)
+- ☀️ Solar generation forecasting (Solcast integration)
+- 💰 Dynamic tariff optimization (Octopus Energy)
+- 🔋 Battery charge/discharge optimization
+- 📊 Web dashboard and REST API
+- 🏠 Automatic Home Assistant sensor creation
 
-### Required Home Assistant Integrations
+**Installation:**
 
-1. **Octopus Energy** (for tariff optimization)
-   - Install via: Settings → Integrations → Add Integration → "Octopus Energy"
-   - Creates entities like `event.octopus_energy_electricity_xxx_current_day_rates`
+See [`energy_demand_predictor/README.md`](energy_demand_predictor/README.md) and [`energy_demand_predictor/INSTALL.md`](energy_demand_predictor/INSTALL.md) for full documentation.
 
-2. **Solcast** (for solar forecasting)
-   - Install via HACS → Integrations → "Solcast PV Forecast"
-   - Requires free Solcast account and API key
-   - Creates entities like `sensor.solcast_pv_forecast_forecast_today`
+Quick start:
+1. Install Octopus Energy and Solcast integrations in Home Assistant
+2. Add this repository to Home Assistant add-ons
+3. Install and configure the add-on
+4. Add automation templates
+5. Start saving money! 💵
 
-3. **Your Battery System** (GivEnergy, Solis, Tesla, etc.)
-   - Battery SOC sensor (e.g., `sensor.battery_soc`)
-   - Battery charge/discharge controls
+## 🎯 What This Does
 
-## 🚀 Installation
+This system uses artificial intelligence and mathematical optimization to:
 
-### Method 1: From GitHub Repository
+1. **Predict** your energy usage for the next 48 hours
+2. **Forecast** solar generation based on weather
+3. **Fetch** dynamic electricity prices (import & export)
+4. **Optimize** when to charge/discharge your battery
+5. **Minimize** your electricity costs automatically
 
-1. **Add Custom Repository:**
-   ```
-   Settings → Add-ons → Add-on Store → ⋮ → Repositories
-   Add: https://github.com/yourusername/ha-energy-predictor
-   ```
+**Expected savings: £8-15 per day** compared to unoptimized battery usage!
 
-2. **Install the Add-on:**
-   - Find "Energy Demand Predictor & Battery Optimizer"
-   - Click Install (takes 5-10 minutes to build)
+## 🚀 Quick Start
 
-3. **Configure** (see Configuration section below)
+```bash
+# 1. Add to Home Assistant
+Settings → Add-ons → Add-on Store → ⋮ → Repositories
+Add: https://github.com/yourusername/ha-energy-predictor
 
-4. **Start the Add-on** and check logs
+# 2. Install prerequisites
+- Octopus Energy integration
+- Solcast PV Forecast integration
+- Battery system with SOC sensor
 
-### Method 2: Local Development
+# 3. Install and configure add-on
+# 4. Add automations to control battery
+# 5. Monitor via web UI: http://homeassistant.local:8099
+```
 
-Copy the `energy_demand_predictor` folder to `/addons/` on your HA system.
+## 📊 How It Works
 
-## ⚙️ Configuration
+```
+┌─────────────────┐
+│  Historical     │
+│  Energy Data    │──┐
+└─────────────────┘  │
+                     │    ┌──────────────┐
+┌─────────────────┐  │    │              │
+│  Solcast Solar  │──┼───→│  ML Model &  │
+│  Forecast       │  │    │  Optimizer   │
+└─────────────────┘  │    │              │
+                     │    └──────┬───────┘
+┌─────────────────┐  │           │
+│  Octopus Energy │──┘           │
+│  Tariff Rates   │              │
+└─────────────────┘              ▼
+                        ┌─────────────────┐
+                        │  Optimal        │
+                        │  Battery        │
+                        │  Schedule       │
+                        └─────────────────┘
+```
 
-Example configuration:
+## 🏗️ Architecture
+
+- **Python Backend:** ML prediction, optimization, HA integration
+- **Machine Learning:** scikit-learn Gradient Boosting
+- **Optimization:** PuLP linear programming solver
+- **Web Interface:** Flask REST API + HTML/JS dashboard
+- **Home Assistant:** Automatic sensor creation and updates
+
+## 📱 Created Sensors
+
+After installation, these sensors appear in Home Assistant:
+
+- `sensor.energy_demand_predictor` - Energy demand forecast
+- `sensor.solar_predictor` - Solar generation forecast
+- `sensor.battery_optimizer` - Current battery action
+- `sensor.energy_cost_predictor` - 48h cost forecast
+
+Each sensor includes detailed attributes with full schedules and predictions.
+
+## 🤖 Example Automations
+
+Control your battery based on AI recommendations:
 
 ```yaml
-# Energy sensor
+automation:
+  - alias: "Battery Optimizer - Execute Actions"
+    trigger:
+      - platform: time_pattern
+        minutes: "/30"
+    action:
+      - choose:
+          - conditions: "{{ states('sensor.battery_optimizer') == 'charge' }}"
+            sequence:
+              - service: number.set_value
+                target:
+                  entity_id: number.battery_charge_current
+                data:
+                  value: "{{ state_attr('sensor.battery_optimizer', 'target_power_kw') }}"
+```
+
+See [`energy_demand_predictor/automations_examples.yaml`](energy_demand_predictor/automations_examples.yaml) for complete templates.
+
+## 🔧 Configuration
+
+```yaml
+# Energy consumption
 entity_id: sensor.house_load
-prediction_slots: 96
+prediction_slots: 96  # 48 hours
 max_training_days: 30
-api_port: 8099
-auto_update_interval: 3600
 
 # Octopus Energy
 enable_octopus_integration: true
 octopus_import_rate_entity: event.octopus_energy_electricity_xxx_current_day_rates
 octopus_export_rate_entity: event.octopus_energy_electricity_xxx_export_current_day_rates
 
-# Solar
+# Solar (Solcast)
 solar_forecast_provider: solcast
 solcast_forecast_entity: sensor.solcast_pv_forecast_forecast_today
-solar_forecast_mode: estimate
 
 # Battery
 battery_capacity_kwh: 9.5
@@ -80,147 +145,93 @@ battery_min_soc: 0.1
 battery_reserve_soc: 0.2
 max_charge_rate_kw: 3.6
 max_discharge_rate_kw: 3.6
-charge_efficiency: 0.95
-discharge_efficiency: 0.95
-battery_degradation_cost_per_cycle: 0.05
-battery_soc_entity: sensor.battery_soc
 
 # Grid
 allow_grid_export: true
 max_export_rate_kw: 5.0
 ```
 
-## 🏠 Home Assistant Sensors
+## 📚 Documentation
 
-After starting, these sensors are automatically created:
+- **README:** [`energy_demand_predictor/README.md`](energy_demand_predictor/README.md)
+- **Installation:** [`energy_demand_predictor/INSTALL.md`](energy_demand_predictor/INSTALL.md)
+- **Automations:** [`energy_demand_predictor/automations_examples.yaml`](energy_demand_predictor/automations_examples.yaml)
+- **Changelog:** [`energy_demand_predictor/CHANGELOG.md`](energy_demand_predictor/CHANGELOG.md)
 
-### `sensor.energy_demand_predictor`
-- **State:** Next 30-min demand prediction (kW)
-- **Attributes:**
-  - `predictions` - Next 24h (48 slots)
-  - `extended_predictions` - Hours 24-48
+## 🌟 Features
 
-### `sensor.solar_predictor`
-- **State:** Current solar prediction (kW)
-- **Attributes:**
-  - `predictions` - Next 48h solar forecast
-  - `total_48h_kwh` - Total expected generation
+### Energy Prediction
+- Machine learning model learns your usage patterns
+- Considers time of day, day of week, seasonality
+- Retrains automatically with new data
+- 48-hour forecast in 30-minute intervals
 
-### `sensor.battery_optimizer`
-- **State:** Current action (`charge`, `discharge`, or `hold`)
-- **Attributes:**
-  - `target_power_kw` - How much to charge/discharge
-  - `current_soc_percent` - Current battery level
-  - `schedule` - Full 48h optimization schedule
-  - `next_action_changes` - When actions will change
+### Solar Forecasting
+- Integrates with Solcast for accurate forecasts
+- Supports multiple forecast modes (conservative/optimistic)
+- Accounts for weather and panel specifications
 
-### `sensor.energy_cost_predictor`
-- **State:** Total predicted cost for 48h (£)
-- **Attributes:**
-  - `import_cost_48h` - Cost of grid imports
-  - `export_revenue_48h` - Revenue from exports
+### Battery Optimization
+- Linear programming solver finds optimal schedule
+- Minimizes: `import_cost - export_revenue + degradation`
+- Respects battery limits and constraints
+- Updates every 30-60 minutes
 
-## 🤖 Example Automations
-
-See `automations_examples.yaml` for complete automation templates including:
-
-- Execute battery charge/discharge actions
-- Alert before expensive periods
-- Smart EV charging during cheap rates
-- And more!
-
-## 🔧 API Usage
-
-### Web Interface
-```
-http://homeassistant.local:8099
-```
-
-### REST API Endpoints
-
-**Get Current Battery Action:**
-```bash
-curl http://homeassistant.local:8099/api/battery/current
-```
-
-**Get Full Schedule:**
-```bash
-curl http://homeassistant.local:8099/api/battery/schedule
-```
-
-**Trigger Manual Optimization:**
-```bash
-curl -X POST http://homeassistant.local:8099/api/optimize
-```
-
-## 📊 How It Works
-
-The optimizer uses linear programming to solve:
-
-**Minimize:** Grid import costs - Export revenue + Battery degradation
-
-**Subject to:**
-- Energy balance (supply = demand every 30 min)
-- Battery capacity limits
-- Charge/discharge rate limits
-- Minimum SOC requirements
-- Can't charge & discharge simultaneously
-
-**Result:** Mathematically optimal schedule that maximizes savings!
+### Tariff Integration
+- Dynamic pricing from Octopus Energy
+- Supports Agile, Go, and other variable tariffs
+- Import and export rates
+- Automatically adapts to price changes
 
 ## 🎛️ Tuning
 
-### Conservative (protect battery)
-```yaml
-battery_min_soc: 0.2
-battery_reserve_soc: 0.3
-battery_degradation_cost_per_cycle: 0.10
-```
+**Conservative** (protect battery):
+- Higher reserve SOC
+- Higher degradation cost
+- Wider safety margins
 
-### Aggressive (maximize savings)
-```yaml
-battery_min_soc: 0.05
-battery_reserve_soc: 0.1
-battery_degradation_cost_per_cycle: 0.02
-```
+**Aggressive** (maximize savings):
+- Lower reserve SOC
+- Lower degradation cost
+- More frequent cycling
 
-## ❓ Troubleshooting
+## 💡 Use Cases
 
-### "No predictions available"
-- Ensure entity_id is correct
-- Check 7+ days of historical data exists
-- Review add-on logs
+- **Time-of-use tariffs:** Buy low, sell high
+- **Agile pricing:** Real-time rate optimization
+- **Solar self-consumption:** Maximize use of own generation
+- **EV charging:** Charge car during cheap periods
+- **Load shifting:** Run appliances at optimal times
 
-### "Octopus rates not found"
-- Verify Octopus integration installed
-- Check entity names in Developer Tools → States
+## 🐛 Troubleshooting
 
-### "Solcast forecast failed"
-- Ensure Solcast integration configured
-- Check API calls remaining (10/day limit)
+Common issues and solutions in [`INSTALL.md`](energy_demand_predictor/INSTALL.md)
 
-### "Optimization status: Infeasible"
-- Try lowering `battery_reserve_soc`
-- Check `max_charge_rate_kw` matches your battery
+## 🤝 Contributing
 
-## 📞 Support
-
-- **GitHub Issues:** Report bugs and feature requests
-- **Logs:** Always check add-on logs first
-- **Documentation:** See full guide in `DOCUMENTATION.md`
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
 ## 📄 License
 
-MIT License - See LICENSE file
+MIT License - see [`LICENSE`](energy_demand_predictor/LICENSE)
 
-## 🙏 Credits
+## 🙏 Acknowledgments
 
-Built with:
-- scikit-learn (machine learning)
-- PuLP (linear programming)
-- Flask (web interface)
-- Home Assistant (smart home platform)
+- Home Assistant community
+- Octopus Energy for great API
+- Solcast for solar forecasting
+- scikit-learn and PuLP teams
+
+## 📞 Support
+
+- **Issues:** GitHub Issues
+- **Discussions:** GitHub Discussions
+- **Documentation:** See `/energy_demand_predictor/` folder
 
 ---
 
-Happy optimizing! 🎉 Save money and the planet! 🌍
+**Save money and the planet! 🌍⚡💰**
