@@ -1,21 +1,20 @@
 """
-Octopus Agile Pricing Provider Implementation
+Import Pricing Provider - Octopus Agile
 
-Handles Octopus Agile import pricing, including prediction when prices
-aren't available yet (before 4pm update).
+Provides future import electricity prices from Octopus Agile tariff.
+Handles the 4pm price gap with intelligent prediction.
 """
 
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-# Handle both AppDaemon (relative) and standalone (absolute) imports
 try:
-    from .pricing_provider_base import PricingProvider
+    from .base_provider import DataProvider
 except ImportError:
-    from pricing_provider_base import PricingProvider
+    from base_provider import DataProvider
 
 
-class OctopusAgilePricingProvider(PricingProvider):
+class ImportPricingProvider(DataProvider):
     """
     Octopus Agile pricing implementation.
     
@@ -27,6 +26,14 @@ class OctopusAgilePricingProvider(PricingProvider):
     
     This provider handles the gap by predicting missing prices.
     """
+    
+    def __init__(self, hass):
+        """Initialize the import pricing provider"""
+        super().__init__(hass)
+        self.current_rate_sensor = None
+        self.rates_event = None
+        self.export_rate_sensor = None
+        self.price_history = []  # For prediction
     
     def setup(self, config: Dict) -> bool:
         """
@@ -66,7 +73,7 @@ class OctopusAgilePricingProvider(PricingProvider):
                 return False
             
             # Test entities exist
-            current_rate = self.get_state(self.current_rate_sensor)
+            current_rate = self.hass.get_state(self.current_rate_sensor)
             if current_rate is None:
                 self.log(f"Cannot find entity: {self.current_rate_sensor}", level="ERROR")
                 return False
@@ -246,7 +253,152 @@ class OctopusAgilePricingProvider(PricingProvider):
         except Exception as e:
             self.log(f"Could not load historical prices: {e}", level="WARNING")
     
+    def get_data(self, hours: int = 24) -> List[Dict]:
+        """
+        Get import prices for next N hours (simple format for plan creator).
+        
+        Args:
+            hours: Number of hours to forecast (default 24)
+            
+        Returns:
+            List of {'time': datetime, 'price': float, 'is_predicted': bool} dicts
+        """
+        result = self.get_prices_with_confidence(hours)
+        
+        # Return just the prices list in standard format
+        prices_list = []
+        for price in result.get('prices', []):
+            prices_list.append({
+                'time': price['start'],
+                'price': price['price'],
+                'is_predicted': price.get('is_predicted', False)
+            })
+        
+        return prices_list
+    
     def get_prices_with_confidence(self, hours: int = 24) -> Dict:
+        """
+        Get prices with confidence indicators (for backwards compatibility).
+        
+        Returns:
+            Dict with prices, statistics, and confidence info
+        """
+        prices = self.get_prices_for_planning(hours)
+        
+        known_count = sum(1 for p in prices if not p.get('is_predicted', False))
+        predicted_count = len(prices) - known_count
+        
+        hours_known = known_count / 2
+        hours_predicted = predicted_count / 2
+        
+        # Determine overall confidence
+        if hours_predicted == 0:
+            confidence = 'high'
+        elif hours_predicted < 6:
+            confidence = 'medium'
+        else:
+            confidence = 'low'
+        
+        # Find where predictions start
+        predicted_from = None
+        for price in prices:
+            if price.get('is_predicted', False):
+                predicted_from = price['start']
+                break
+        
+        return {
+            'prices': prices,
+            'hours_known': hours_known,
+            'hours_predicted': hours_predicted,
+            'confidence': confidence,
+            'predicted_from': predicted_from,
+            'statistics': self.get_price_statistics(prices)
+        }
+    
+    def get_prices_for_planning(self, hours: int = 24) -> List[Dict]:
+        """
+        Get complete price forecast by filling gaps with predictions.
+        
+        Returns:
+            List of price dicts with 30-min slots
+        """
+        now = datetime.now().replace(second=0, microsecond=0)
+        
+        # Align to 30-minute boundary
+        if now.minute < 30:
+            now = now.replace(minute=0)
+        else:
+            now = now.replace(minute=30)
+        
+        # Get known prices
+        known_prices = self.get_known_prices()
+        
+        # Create dict for quick lookup
+        known_prices_dict = {}
+        for price in known_prices:
+            known_prices_dict[price['start']] = price
+        
+        # Build complete price list
+        complete_prices = []
+        current_time = now
+        end_time = now + timedelta(hours=hours)
+        
+        while current_time < end_time:
+            slot_end = current_time + timedelta(minutes=30)
+            
+            if current_time in known_prices_dict:
+                # We have known price
+                complete_prices.append(known_prices_dict[current_time])
+            else:
+                # Need to predict
+                predicted_price = self.predict_price(current_time)
+                complete_prices.append({
+                    'start': current_time,
+                    'end': slot_end,
+                    'price': predicted_price,
+                    'is_predicted': True,
+                    'prediction_method': 'historical_median'
+                })
+            
+            current_time = slot_end
+        
+        return complete_prices
+    
+    def get_price_statistics(self, prices: List[Dict]) -> Dict:
+        """Calculate statistics from price list"""
+        if not prices:
+            return {'min': 0, 'max': 0, 'avg': 0}
+        
+        price_values = [p['price'] for p in prices]
+        return {
+            'min': min(price_values),
+            'max': max(price_values),
+            'avg': sum(price_values) / len(price_values)
+        }
+    
+    def predict_price(self, target_time: datetime) -> float:
+        """
+        Predict price for a given time using historical data.
+        
+        Simple implementation: uses median of historical prices at this time.
+        """
+        # Use historical median at this hour
+        if self.price_history:
+            hour_prices = [
+                p['price'] for p in self.price_history
+                if p['hour'] == target_time.hour
+            ]
+            if hour_prices:
+                # Return median
+                sorted_prices = sorted(hour_prices)
+                mid = len(sorted_prices) // 2
+                return sorted_prices[mid]
+        
+        # Fallback: use current price or default
+        current = self.get_current_price()
+        return current if current is not None else 20.0
+    
+    def get_pricing_gaps(self, hours: int = 24) -> List[Tuple[datetime, datetime]]:
         """
         Get prices with confidence indicators.
         
@@ -342,3 +494,32 @@ class OctopusAgilePricingProvider(PricingProvider):
             gaps.append((gap_start, prices[-1]['end']))
         
         return gaps
+    
+    def get_health(self) -> Dict:
+        """Get health status of import pricing provider"""
+        try:
+            # Get current prices to check health
+            result = self.get_prices_with_confidence(hours=24)
+            
+            known_hours = result.get('hours_known', 0)
+            predicted_hours = result.get('hours_predicted', 0)
+            confidence = result.get('confidence', 'unknown')
+            
+            status = 'healthy' if known_hours >= 12 else 'degraded' if known_hours > 0 else 'failed'
+            
+            message = f"Octopus Agile: {known_hours:.1f}h known, {predicted_hours:.1f}h predicted"
+            
+            return {
+                'status': status,
+                'last_update': self._last_update or datetime.now(),
+                'message': message,
+                'confidence': confidence
+            }
+        except Exception as e:
+            return {
+                'status': 'failed',
+                'last_update': self._last_update,
+                'message': f"Error: {str(e)}",
+                'confidence': 'none'
+            }
+

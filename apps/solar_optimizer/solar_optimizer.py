@@ -536,7 +536,7 @@ class SmartSolarOptimizer(hass.Hass):
             hour = (current_hour + offset) % 24
             matching = [w for o, w in daylight_hours if o == offset]
             if matching and total_weight > 0:
-                hourly[offset] = (matching[0] / total_weight) * remaining *5
+                hourly[offset] = (matching[0] / total_weight) * remaining
             else:
                 hourly[offset] = 0
         

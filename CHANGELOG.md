@@ -5,7 +5,42 @@ All notable changes to SolarBat-AI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.2.0] - 2026-01-11 (In Development)
+## [2.3.0] - 2026-01-11 (In Development)
+
+### Architecture Refactor - Provider/Consumer Pattern
+
+**Breaking Changes:**
+- Complete architectural redesign for better maintainability
+- File structure reorganized (all providers in `providers/` directory)
+- Clean separation between data providers, plan creation, and plan execution
+
+### Added - New Provider System
+- **`base_provider.py`** - Abstract base class for all data providers
+- **`import_pricing_provider.py`** - Future import electricity prices (Octopus Agile)
+- **`export_pricing_provider.py`** - Future export electricity prices
+- **`solar_forecast_provider.py`** - PV generation forecast (Solcast)
+- **`load_forecast_provider.py`** - AI-powered house consumption forecast
+- **`system_state_provider.py`** - Current battery/inverter state
+
+### Added - New Core Components
+- **`plan_creator.py`** - Pure optimization engine (consumes all provider data)
+- **`plan_executor.py`** - Writes to inverter only when plan differs from current state
+- **Health monitoring** - Each provider reports status, confidence, last update
+- **Independent caching** - Each provider manages its own cache strategy
+
+### Benefits
+- **Testability** - Mock any provider independently
+- **Swappability** - Easy to switch tariffs (Agile → Tracker → Fixed)
+- **Reusability** - Providers can be used by other apps
+- **Monitoring** - Health check on each data source
+- **Clean separation** - Data fetching ≠ Optimization ≠ Execution
+
+### Migration Notes
+- v2.2 logic preserved, just reorganized
+- Test harness updated to use new architecture
+- All existing features maintained (arbitrage, clipping, AI prediction)
+
+## [2.2.0] - 2026-01-11
 
 ### Added
 - **AI-powered load forecasting** - Learns from Home Assistant historical consumption data

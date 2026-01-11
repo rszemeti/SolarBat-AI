@@ -235,6 +235,9 @@ def load_config_from_env() -> Dict:
         'discharge_slot1_end_minute': os.getenv('DISCHARGE_SLOT1_END_MINUTE', 'number.solis8_timed_discharge_end_minutes'),
         'discharge_slot1_soc': os.getenv('DISCHARGE_SLOT1_SOC', 'number.solis8_timed_discharge_soc'),
         'discharge_slot1_current': os.getenv('DISCHARGE_SLOT1_CURRENT', 'number.solis8_timed_discharge_current'),
+        
+        # Testing/simulation parameters
+        'solar_scaling': float(os.getenv('SOLAR_SCALING', '1.0')),
     }
     
     if not config['ha_url'] or not config['ha_token']:
@@ -439,18 +442,18 @@ def test_pricing_provider(hass):
         spec_base.loader.exec_module(base_module)
         sys.modules['pricing_provider_base'] = base_module
         
-        # Load Octopus provider
+        # Load import pricing provider (v2.3)
         spec_octopus = importlib.util.spec_from_file_location(
-            "pricing_provider_octopus_agile",
-            "./apps/solar_optimizer/pricing_provider_octopus_agile.py"
+            "import_pricing_provider",
+            "apps/solar_optimizer/providers/import_pricing_provider.py"
         )
         octopus_module = importlib.util.module_from_spec(spec_octopus)
         spec_octopus.loader.exec_module(octopus_module)
         
-        OctopusAgilePricingProvider = octopus_module.OctopusAgilePricingProvider
+        ImportPricingProvider = octopus_module.ImportPricingProvider
         
         # Create provider
-        pricing = OctopusAgilePricingProvider(hass)
+        pricing = ImportPricingProvider(hass)
         
         # Setup with empty config - let it auto-discover
         success = pricing.setup({})
@@ -636,11 +639,19 @@ def run_planner_and_generate_plan(hass):
         )
         pricing_base_module = importlib.util.module_from_spec(spec_pricing_base)
         spec_pricing_base.loader.exec_module(pricing_base_module)
-        sys.modules['pricing_provider_base'] = pricing_base_module
+        
+        # Load base provider first (v2.3)
+        spec_base_prov = importlib.util.spec_from_file_location(
+            "base_provider",
+            "apps/solar_optimizer/providers/base_provider.py"
+        )
+        base_prov_module = importlib.util.module_from_spec(spec_base_prov)
+        spec_base_prov.loader.exec_module(base_prov_module)
+        sys.modules['base_provider'] = base_prov_module
         
         spec_pricing = importlib.util.spec_from_file_location(
-            "pricing_provider_octopus_agile",
-            "./apps/solar_optimizer/pricing_provider_octopus_agile.py"
+            "import_pricing_provider",
+            "apps/solar_optimizer/providers/import_pricing_provider.py"
         )
         pricing_module = importlib.util.module_from_spec(spec_pricing)
         spec_pricing.loader.exec_module(pricing_module)
@@ -662,7 +673,7 @@ def run_planner_and_generate_plan(hass):
         spec_inv.loader.exec_module(inv_module)
         
         # Create instances
-        pricing = pricing_module.OctopusAgilePricingProvider(hass)
+        pricing = pricing_module.ImportPricingProvider(hass)
         pricing.setup({})
         
         config = load_config_from_env()
@@ -740,10 +751,17 @@ def run_planner_and_generate_plan(hass):
                 print(f"[ERROR] No future solar forecast data available")
                 return None
             
+            # Apply solar scaling factor (for testing)
+            solar_scaling = float(os.getenv('SOLAR_SCALING', '1.0'))
+            if solar_scaling != 1.0:
+                print(f"[PLAN] Applying solar scaling factor: {solar_scaling}x")
+                for sf in solar_forecast:
+                    sf['pv_estimate'] = sf['pv_estimate'] * solar_scaling
+            
             print(f"[PLAN] Loaded {len(solar_forecast)} solar forecast points")
             
             # Show first few for verification
-            print(f"[PLAN] Solar forecast sample:")
+            print(f"[PLAN] Solar forecast sample (scaled {solar_scaling}x):")
             for i, sf in enumerate(solar_forecast[:6]):
                 print(f"       {sf['period_end'].strftime('%H:%M %d/%m')}: {sf['pv_estimate']:.2f}kW")
                 
