@@ -5,5 +5,15 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
 
-# That's it! Just two packages needed for basic testing.
+# Machine Learning Planner (optional)
+# Uncomment to enable ML-based optimization
+# scikit-learn>=1.0.0
+# numpy>=1.21.0
+
+# Linear Programming Planner (optional)
+# Uncomment to enable LP-based optimization
+# pulp>=2.7.0
+
+# That's it! Core functionality needs just two packages.
+# ML and LP planners are optional advanced features.
 
