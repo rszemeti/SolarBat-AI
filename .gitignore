@@ -1,5 +1,10 @@
-/.env
-/__pycache__/
-*.pyc
-*/__pycache__/
-*/*.pyc
+# venv / env files
+.env
+.venv
+env/
+venv/
+
+# python bytecode everywhere
+__pycache__/
+*.py[cod]
+*$py.class
