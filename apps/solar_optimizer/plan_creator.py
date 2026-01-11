@@ -188,6 +188,8 @@ class PlanCreator:
             
             # Decide mode
             mode, action, soc_change = self._decide_mode(
+                slot=slot,
+                feed_in_priority_strategy=feed_in_priority_strategy,
                 current_soc=current_soc,
                 solar_kwh=solar_kwh,
                 load_kwh=load_kwh,
@@ -406,12 +408,18 @@ class PlanCreator:
         
         return surplus
     
-    def _decide_mode(self, current_soc, solar_kwh, load_kwh, import_price, export_price,
+    def _decide_mode(self, slot, feed_in_priority_strategy, 
+                     current_soc, solar_kwh, load_kwh, import_price, export_price,
                      future_deficit, future_solar_surplus, future_min_price,
                      battery_capacity, max_charge_rate, max_discharge_rate,
                      min_soc, max_soc) -> Tuple[str, str, float]:
         """
         Decide what to do this slot based on smart analysis.
+        
+        Args:
+            slot: Current time slot dict
+            feed_in_priority_strategy: Strategic decision dict from _should_use_feed_in_priority_strategy
+            ... (other parameters)
         
         Returns:
             (mode, action_description, soc_change)

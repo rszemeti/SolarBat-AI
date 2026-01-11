@@ -797,13 +797,13 @@ def run_planner_and_generate_plan(hass):
         load_module = importlib.util.module_from_spec(spec_load)
         spec_load.loader.exec_module(load_module)
         
-        # Load cost optimizer
-        spec_opt = importlib.util.spec_from_file_location(
-            "cost_optimizer",
-            "./apps/solar_optimizer/cost_optimizer.py"
+        # Load plan creator (v2.3)
+        spec_plan = importlib.util.spec_from_file_location(
+            "plan_creator",
+            "./apps/solar_optimizer/plan_creator.py"
         )
-        opt_module = importlib.util.module_from_spec(spec_opt)
-        spec_opt.loader.exec_module(opt_module)
+        plan_module = importlib.util.module_from_spec(spec_plan)
+        spec_plan.loader.exec_module(plan_module)
         
         # Create load forecaster
         load_forecaster = load_module.LoadForecaster(hass)
@@ -815,25 +815,37 @@ def run_planner_and_generate_plan(hass):
         print("[PLAN] Predicting load for next 24 hours using AI...")
         load_forecast = load_forecaster.predict_loads_24h()
         
-        # Create optimizer
-        optimizer = opt_module.CostOptimizer(hass)
+        # Create plan creator (v2.3 - pure optimization engine)
+        plan_creator = plan_module.PlanCreator()
         
-        # Generate optimal plan
-        print("[PLAN] Running cost optimizer...")
-        plan_steps = optimizer.optimize(
-            prices=price_data['prices'],
-            solar_forecast=solar_forecast,
+        # Prepare provider data format for plan creator
+        import_prices = [{'time': p['start'], 'price': p['price'], 'is_predicted': p.get('is_predicted', False)} 
+                        for p in price_data['prices']]
+        export_prices = [{'time': p['start'], 'price': price_data.get('export_price', 15.0)} 
+                        for p in price_data['prices']]
+        solar_data = [{'time': s['period_end'], 'kw': s['pv_estimate']} for s in solar_forecast]
+        
+        system_state = {
+            'current_state': inv_state,
+            'capabilities': inv_caps,
+            'active_slots': {'charge': [], 'discharge': []}
+        }
+        
+        # Generate optimal plan using v2.3 architecture
+        print("[PLAN] Running plan creator (v2.3)...")
+        plan = plan_creator.create_plan(
+            import_prices=import_prices,
+            export_prices=export_prices,
+            solar_forecast=solar_data,
             load_forecast=load_forecast,
-            battery_soc=inv_state['battery_soc'],
-            battery_capacity=inv_caps['battery_capacity'],
-            max_charge_rate=inv_caps['max_charge_rate'],
-            max_discharge_rate=inv_caps['max_discharge_rate'],
-            export_price=export_price,
-            min_soc=10.0,
-            max_soc=95.0
+            system_state=system_state
         )
         
-        plan = {
+        # Extract plan steps from v2.3 plan object
+        plan_steps = plan['slots']
+        
+        # Build compatible plan dict for visualization
+        plan_dict = {
             'timestamp': datetime.now(),
             'battery_soc': inv_state['battery_soc'],
             'battery_capacity': inv_caps['battery_capacity'],
@@ -841,7 +853,7 @@ def run_planner_and_generate_plan(hass):
             'solar_forecast': solar_forecast,
             'plan_steps': plan_steps,
             'statistics': price_data['statistics'],
-            'confidence': price_data['confidence'],
+            'confidence': price_data.get('confidence', plan['metadata'].get('confidence', 'unknown')),
             'hours_known': price_data['hours_known'],
             'hours_predicted': price_data['hours_predicted'],
             'total_cost': plan_steps[-1].get('cumulative_cost', 0) / 100 if plan_steps else 0.0  # In pounds
@@ -852,7 +864,7 @@ def run_planner_and_generate_plan(hass):
         print(f"       Prices: {price_data['hours_known']:.1f}h known, {price_data['hours_predicted']:.1f}h predicted")
         print(f"       Price range: {price_data['statistics']['min']:.2f}p - {price_data['statistics']['max']:.2f}p")
         
-        return plan
+        return plan_dict
         
     except Exception as e:
         print(f"[ERROR] Error running planner: {e}")

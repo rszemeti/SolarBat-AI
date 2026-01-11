@@ -1,0 +1,42 @@
+{
+  "name": "negative_pricing_overnight",
+  "description": "Negative overnight prices, should charge and get paid!",
+  "date": "2026-08-20",
+  "battery": {
+    "soc_start": 30.0,
+    "capacity_kwh": 10.0,
+    "max_charge_kw": 3.0,
+    "max_discharge_kw": 3.0
+  },
+  "solar_profile": {
+    "type": "parametric_bell_curve",
+    "peak_kw": 17.0,
+    "sunrise_hour": 5.0,
+    "sunset_hour": 21.0,
+    "efficiency": 0.75,
+    "variability": 0.02,
+    "total_kwh": 129.9,
+    "description": "Bell curve, 16.0h daylight, 75% efficiency"
+  },
+  "load_profile": {
+    "type": "parametric_daily",
+    "base_kw": 0.3,
+    "morning_peak_kw": 1.5,
+    "evening_peak_kw": 2.5,
+    "total_kwh": 26.7,
+    "description": "Base 0.3kW, peaks 1.5/2.5kW"
+  },
+  "pricing": {
+    "type": "agile_negative",
+    "overnight_avg_p": -5.0,
+    "day_avg_p": 18.0,
+    "peak_avg_p": 28.0,
+    "export_fixed_p": 15.0,
+    "description": "Negative overnight pricing (wind surplus)"
+  },
+  "expected_outcomes": {
+    "charge_at_negative": true,
+    "total_cost_max": -0.5,
+    "notes": "Should charge aggressively during negative prices"
+  }
+}

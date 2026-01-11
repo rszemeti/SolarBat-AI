@@ -1,0 +1,43 @@
+{
+  "name": "low_battery_emergency",
+  "description": "Start at 15% SOC, expensive prices ahead",
+  "date": "2026-11-05",
+  "battery": {
+    "soc_start": 15.0,
+    "capacity_kwh": 10.0,
+    "max_charge_kw": 3.0,
+    "max_discharge_kw": 3.0
+  },
+  "solar_profile": {
+    "type": "parametric_bell_curve",
+    "peak_kw": 17.0,
+    "sunrise_hour": 7.0,
+    "sunset_hour": 17.0,
+    "efficiency": 0.5,
+    "variability": 0.02,
+    "total_kwh": 54.1,
+    "description": "Bell curve, 10.0h daylight, 50% efficiency"
+  },
+  "load_profile": {
+    "type": "parametric_daily",
+    "base_kw": 0.4,
+    "morning_peak_kw": 1.8,
+    "evening_peak_kw": 3.0,
+    "total_kwh": 33.0,
+    "description": "Base 0.4kW, peaks 1.8/3.0kW"
+  },
+  "pricing": {
+    "type": "agile_typical",
+    "overnight_avg_p": 15.0,
+    "day_avg_p": 25.0,
+    "peak_avg_p": 40.0,
+    "export_fixed_p": 15.0,
+    "daily_avg_p": 25.83,
+    "description": "Overnight 15.0p, day 25.0p, peak 40.0p"
+  },
+  "expected_outcomes": {
+    "charge_immediately": true,
+    "avoid_deficit": true,
+    "notes": "Should charge early despite prices to avoid deficit"
+  }
+}
