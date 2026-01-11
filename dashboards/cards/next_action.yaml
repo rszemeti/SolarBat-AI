@@ -1,0 +1,18 @@
+# Next Action Card
+# Shows what the optimizer will do in the current/next hour
+
+type: markdown
+content: |
+  ## 🎯 Next Action
+  
+  **Mode:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').mode if state_attr('sensor.solar_optimizer_plan', 'next_action') else 'Loading...' }}
+  
+  **Reason:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').reason if state_attr('sensor.solar_optimizer_plan', 'next_action') else 'Generating plan...' }}
+  
+  **Time:** {{ as_timestamp(state_attr('sensor.solar_optimizer_plan', 'next_action').timestamp) | timestamp_custom('%H:%M') if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}
+  
+  **Battery:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').battery_soc_start | round(0) if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}% → {{ state_attr('sensor.solar_optimizer_plan', 'next_action').battery_soc_end | round(0) if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}%
+  
+  {% if state_attr('sensor.solar_optimizer_plan', 'wastage_alert') %}
+  ⚠️ **Pre-emptive discharge active!**
+  {% endif %}

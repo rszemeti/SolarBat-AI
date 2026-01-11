@@ -1,0 +1,9 @@
+# Requirements for local testing on Windows
+# Install with: pip install -r requirements-dev.txt
+
+# Minimum required
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# That's it! Just two packages needed for basic testing.
+

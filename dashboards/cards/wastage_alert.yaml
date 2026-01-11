@@ -1,0 +1,19 @@
+# Wastage Alert Card
+# Shows a warning when solar generation will exceed battery + consumption capacity
+
+type: conditional
+conditions:
+  - entity: sensor.solar_wastage_risk
+    state_not: "0.0"
+card:
+  type: markdown
+  content: |
+    ## ⚠️ Solar Wastage Risk
+    
+    **{{ states('sensor.solar_wastage_risk') }} kWh** of solar may be wasted today!
+    
+    **Value:** {{ state_attr('sensor.solar_wastage_risk', 'wastage_value') }}
+    
+    **Recommendation:** Discharge {{ state_attr('sensor.solar_wastage_risk', 'recommended_discharge') }} kWh
+    
+    Current battery: {{ state_attr('sensor.solar_wastage_risk', 'battery_soc') }}%

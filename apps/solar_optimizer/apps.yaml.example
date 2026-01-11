@@ -1,0 +1,80 @@
+# Solar Battery Optimizer Configuration Example
+# Copy this file to /config/appdaemon/apps/solar_optimizer.yaml
+# and customize with your entity IDs
+
+solar_optimizer:
+  module: solar_optimizer
+  class: SmartSolarOptimizer
+  
+  # ============================================
+  # REQUIRED CONFIGURATION
+  # Update these with your actual entity IDs
+  # ============================================
+  
+  # Battery Sensors
+  battery_soc: sensor.solax_battery_soc
+  battery_capacity: sensor.solax_battery_capacity
+  inverter_mode: select.solax_charger_use_mode
+  
+  # Inverter Mode Options
+  # Specify the EXACT mode names your inverter uses (case-sensitive!)
+  # Check Developer Tools -> States -> select.solax_charger_use_mode for available options
+  mode_self_use: "Self Use"          # Standard battery operation
+  mode_grid_first: "Grid First"      # Use grid, save battery
+  mode_force_charge: "Force Charge"  # Charge from grid
+  mode_force_discharge: "Force Discharge"  # Discharge to grid (if supported)
+  # If your inverter doesn't have Force Discharge, leave as "Self Use" - will use consumption to drain
+  
+  # Inverter Capability Sensors
+  # These are read automatically to determine charge/discharge limits
+  max_charge_rate: sensor.solax_battery_charge_max_current  # Amps
+  max_discharge_rate: sensor.solax_battery_discharge_max_current  # Amps
+  inverter_max_power: sensor.solax_inverter_power  # Watts
+  battery_voltage: sensor.solax_battery_voltage  # Volts
+  grid_export_limit: sensor.solax_export_control_user_limit  # Watts
+  
+  # Real-time Power Sensors
+  pv_power: sensor.solax_pv_power  # Watts
+  battery_power: sensor.solax_battery_power  # Watts (+ charging, - discharging)
+  load_power: sensor.solax_house_load  # Watts
+  grid_power: sensor.solax_measured_power  # Watts (- exporting, + importing)
+  
+  # Solar Forecasting (Solcast Integration)
+  solcast_remaining: sensor.solcast_pv_forecast_forecast_remaining_today
+  solcast_tomorrow: sensor.solcast_pv_forecast_forecast_tomorrow
+  solcast_forecast_today: sensor.solcast_pv_forecast_forecast_today
+  
+  # Octopus Agile Pricing
+  # IMPORTANT: Replace 'xxxxx' with your actual MPAN number
+  agile_current: sensor.octopus_energy_electricity_xxxxx_current_rate
+  agile_rates: event.octopus_energy_electricity_xxxxx_current_day_rates
+  
+  # ============================================
+  # OPTIONAL CONFIGURATION
+  # ============================================
+  
+  # Export Tariff Settings
+  # Set has_export to true if you have Agile Export or similar
+  has_export: false
+  # export_rate_sensor: sensor.octopus_energy_electricity_export_current_rate
+  
+  # Pre-emptive Discharge Settings
+  # Enables early morning battery discharge to avoid wasting solar
+  enable_preemptive_discharge: true
+  min_wastage_threshold: 1.0  # kWh - minimum solar wastage to trigger discharge
+  min_benefit_threshold: 0.50  # £ - minimum financial benefit required to discharge
+  preemptive_discharge_min_soc: 50  # % - don't discharge battery below this level
+  preemptive_discharge_max_price: 20  # p/kWh - don't discharge if grid is more expensive than this
+  
+  # Behavior Settings
+  min_change_interval: 3600  # seconds - minimum time between mode changes (prevents inverter spam)
+  
+  # Data Storage
+  history_file: /config/appdaemon/solar_optimizer_history.json
+  
+  # ============================================
+  # FALLBACK VALUES (if sensors unavailable)
+  # ============================================
+  # These are only used if the corresponding sensors don't exist or return invalid data
+  
+  # battery_capacity: 10.0  # kWh - manual override if sensor unavailable
