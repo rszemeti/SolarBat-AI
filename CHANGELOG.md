@@ -5,6 +5,52 @@ All notable changes to SolarBat-AI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-01-11 (In Development)
+
+### Added
+- **AI-powered load forecasting** - Learns from Home Assistant historical consumption data
+- **Intelligent cost optimizer** - Only charges when actually needed, not just because it's cheap
+- **Multi-method load prediction** - Uses yesterday, last week, hourly averages, and trend analysis
+- **Confidence-weighted predictions** - Combines multiple methods with smart weighting
+- **Future deficit calculation** - Plans ahead to avoid running out of battery
+- **Solar wastage prevention** - Won't charge battery before sunny periods
+- **True arbitrage optimization** - Only charges if cheaper than future prices
+- **Smart energy balance** - Considers solar + battery + load holistically
+
+### Changed
+- **Removed dumb threshold logic** - No more "charge if price < X" without considering need
+- **Optimization over simulation** - Generates actual optimal plan, not just threshold reactions
+- **History-based learning** - Uses your actual consumption patterns, not generic assumptions
+
+### Technical
+- `load_forecaster.py` - New AI component for consumption prediction
+- `cost_optimizer.py` - New optimization engine for minimal-cost scheduling
+- Home Assistant history API integration for learning
+- Weighted prediction ensemble for robustness
+
+## [2.1.0] - 2026-01-11
+
+### Added
+- **Inverter abstraction layer** - Clean interface for different inverter types
+- **Solis S6 Hybrid support** - Full timed charge/discharge slot control via solax_modbus
+- **Pricing prediction system** - Handles Octopus Agile 4pm price gap with intelligent fallback
+- **Windows test harness** - Local testing in VS Code before AppDaemon deployment
+- **Web-based plan visualization** - Beautiful HTML dashboard showing 24h plan with charts
+- **Auto-discovery** - Automatically finds Octopus Agile and Solis entities
+- **Smart value helper** - Handles both hardcoded values and sensor references
+- **Conditional imports** - Works in both test harness and AppDaemon
+
+### Changed
+- **Data-driven thresholds** - Charge/discharge decisions based on actual price range, not hardcoded values
+- **Separate import/export pricing** - Proper handling of different import and export rates
+- **Real Solcast integration** - No dummy solar data, fails clearly if Solcast unavailable
+- **Proper unit conversion** - Fixed Octopus prices from pounds to pence
+
+### Fixed
+- **UTF-8 encoding** - Proper character display in web interface
+- **Solcast period_start** - Correctly parses Solcast forecast data structure
+- **Price prediction confidence** - Clear indication of known vs predicted prices
+
 ## [2.0.0] - 2026-01-11
 
 ### Added

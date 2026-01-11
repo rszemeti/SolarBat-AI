@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>SolarBat-AI Plan - {{timestamp}}</title>
+    <link rel="stylesheet" href="plan.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>SolarBat-AI Optimization Plan</h1>
+        <p>Generated: {{timestamp}}</p>
+        
+        <div class="summary">
+            {{summary_stats}}
+        </div>
+        
+        <div class="chart-container">
+            <h2>Battery State of Charge</h2>
+            <div class="chart">
+                <canvas id="socChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h2>Electricity Pricing</h2>
+            <div class="chart">
+                <canvas id="priceChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h2>Solar Generation Forecast</h2>
+            <div class="chart">
+                <canvas id="solarChart"></canvas>
+            </div>
+        </div>
+        
+        <h2>Detailed Plan</h2>
+        <table class="plan-table">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Mode</th>
+                    <th>Action</th>
+                    <th>SOC</th>
+                    <th>Solar (kW)</th>
+                    <th>Import (p/kWh)</th>
+                    <th>Export (p/kWh)</th>
+                    <th>Cost (p)</th>
+                    <th>Total (£)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{plan_rows}}
+            </tbody>
+        </table>
+        
+        <div class="info-box">
+            {{info_summary}}
+        </div>
+    </div>
+    
+    <script src="plan.js"></script>
+    <script>
+        // Chart data injected from Python
+        const chartData = {{chart_data}};
+        
+        // Initialize charts when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeCharts(chartData);
+        });
+    </script>
+</body>
+</html>

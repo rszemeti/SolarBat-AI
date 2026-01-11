@@ -768,9 +768,52 @@ def run_planner_and_generate_plan(hass):
         
         print(f"[PLAN] Export price: {export_price}p/kWh")
         
-        # Build actual plan with SOC simulation
-        print("[PLAN] Simulating battery SOC and modes...")
-        plan_steps = simulate_plan(price_data['prices'], solar_forecast, inv_state, inv_caps, export_price)
+        # Load the AI components
+        print("[PLAN] Loading AI load forecaster and cost optimizer...")
+        
+        # Load load forecaster
+        spec_load = importlib.util.spec_from_file_location(
+            "load_forecaster",
+            "./apps/solar_optimizer/load_forecaster.py"
+        )
+        load_module = importlib.util.module_from_spec(spec_load)
+        spec_load.loader.exec_module(load_module)
+        
+        # Load cost optimizer
+        spec_opt = importlib.util.spec_from_file_location(
+            "cost_optimizer",
+            "./apps/solar_optimizer/cost_optimizer.py"
+        )
+        opt_module = importlib.util.module_from_spec(spec_opt)
+        spec_opt.loader.exec_module(opt_module)
+        
+        # Create load forecaster
+        load_forecaster = load_module.LoadForecaster(hass)
+        if not load_forecaster.setup(config):
+            print("[ERROR] Load forecaster setup failed")
+            return None
+        
+        # Get load forecast
+        print("[PLAN] Predicting load for next 24 hours using AI...")
+        load_forecast = load_forecaster.predict_loads_24h()
+        
+        # Create optimizer
+        optimizer = opt_module.CostOptimizer(hass)
+        
+        # Generate optimal plan
+        print("[PLAN] Running cost optimizer...")
+        plan_steps = optimizer.optimize(
+            prices=price_data['prices'],
+            solar_forecast=solar_forecast,
+            load_forecast=load_forecast,
+            battery_soc=inv_state['battery_soc'],
+            battery_capacity=inv_caps['battery_capacity'],
+            max_charge_rate=inv_caps['max_charge_rate'],
+            max_discharge_rate=inv_caps['max_discharge_rate'],
+            export_price=export_price,
+            min_soc=10.0,
+            max_soc=95.0
+        )
         
         plan = {
             'timestamp': datetime.now(),
@@ -783,6 +826,7 @@ def run_planner_and_generate_plan(hass):
             'confidence': price_data['confidence'],
             'hours_known': price_data['hours_known'],
             'hours_predicted': price_data['hours_predicted'],
+            'total_cost': plan_steps[-1].get('cumulative_cost', 0) / 100 if plan_steps else 0.0  # In pounds
         }
         
         print(f"\n[PLAN] Plan generated successfully!")
@@ -917,9 +961,11 @@ def simulate_plan(prices, solar_forecast, inv_state, inv_caps, export_price=15.0
 
 
 def generate_plan_html(plan):
-    """Generate HTML visualization of the plan"""
+    """Generate HTML visualization using templates"""
     if not plan:
         return "<html><body><h1>Error: No plan generated</h1></body></html>"
+    
+    import json
     
     # Build chart data from plan steps
     time_labels = []
@@ -927,601 +973,124 @@ def generate_plan_html(plan):
     export_price_values = []
     soc_values = []
     solar_values = []
-    modes = []
     
     for step in plan['plan_steps']:
         time_labels.append(step['time'].strftime('%H:%M'))
         import_price_values.append(step['import_price'])
         export_price_values.append(step['export_price'])
         soc_values.append(step['soc_end'])
-        solar_values.append(step['solar_pv'])
-        modes.append(step['mode'])
+        solar_values.append(step.get('solar_kw', 0))
     
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>SolarBat-AI Plan - {plan['timestamp'].strftime('%Y-%m-%d %H:%M')}</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            margin: 20px;
-            background: #f5f5f5;
-        }}
-        .container {{
-            max-width: 1400px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #2c3e50;
-            border-bottom: 3px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        h2 {{
-            color: #34495e;
-            margin-top: 30px;
-        }}
-        .summary {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }}
-        .stat-box {{
-            background: #ecf0f1;
-            padding: 15px;
-            border-radius: 5px;
-            border-left: 4px solid #3498db;
-        }}
-        .stat-label {{
-            font-size: 11px;
-            color: #7f8c8d;
-            text-transform: uppercase;
-            font-weight: 600;
-        }}
-        .stat-value {{
-            font-size: 24px;
-            font-weight: bold;
-            color: #2c3e50;
-            margin-top: 5px;
-        }}
-        .chart-container {{
-            margin: 30px 0;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }}
-        .chart {{
-            height: 300px;
-            position: relative;
-        }}
-        .plan-table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-            font-size: 13px;
-        }}
-        .plan-table th {{
-            background: #3498db;
-            color: white;
-            padding: 10px;
-            text-align: left;
-            font-weight: 600;
-        }}
-        .plan-table td {{
-            padding: 8px;
-            border-bottom: 1px solid #ddd;
-        }}
-        .plan-table tr:hover {{
-            background: #f8f9fa;
-        }}
-        .mode-self-use {{ background: #d4edda; }}
-        .mode-force-charge {{ background: #fff3cd; }}
-        .mode-force-discharge {{ background: #f8d7da; }}
-        .predicted {{
-            color: #e67e22;
-            font-style: italic;
-        }}
-        canvas {{
-            max-width: 100%;
-        }}
-        .info-box {{
-            margin-top: 30px;
-            padding: 15px;
-            background: #e8f4f8;
-            border-radius: 5px;
-            border-left: 4px solid #3498db;
-        }}
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <div class="container">
-        <h1>SolarBat-AI Optimization Plan</h1>
-        <p>Generated: {plan['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</p>
-        
-        <div class="summary">
-            <div class="stat-box">
-                <div class="stat-label">Current SOC</div>
-                <div class="stat-value">{plan['battery_soc']:.1f}%</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Battery Size</div>
-                <div class="stat-value">{plan['battery_capacity']:.1f} kWh</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Min Price</div>
-                <div class="stat-value">{plan['statistics']['min']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Max Price</div>
-                <div class="stat-value">{plan['statistics']['max']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Avg Price</div>
-                <div class="stat-value">{plan['statistics']['avg']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Confidence</div>
-                <div class="stat-value">{plan['confidence'].upper()}</div>
-            </div>
-        </div>
-        
-        <div class="chart-container">
-            <h2>Battery State of Charge</h2>
-            <div class="chart">
-                <canvas id="socChart"></canvas>
-            </div>
-        </div>
-        
-        <div class="chart-container">
-            <h2>Electricity Pricing</h2>
-            <div class="chart">
-                <canvas id="priceChart"></canvas>
-            </div>
-        </div>
-        
-        <div class="chart-container">
-            <h2>Solar Generation Forecast</h2>
-            <div class="chart">
-                <canvas id="solarChart"></canvas>
-            </div>
-        </div>
-        
-        <h2>Detailed Plan</h2>
-        <table class="plan-table">
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Mode</th>
-                    <th>Action</th>
-                    <th>SOC</th>
-                    <th>Solar (kW)</th>
-                    <th>Import (p/kWh)</th>
-                    <th>Export (p/kWh)</th>
-                </tr>
-            </thead>
-            <tbody>
-"""
+    # Load templates
+    try:
+        with open('./templates/plan.html', 'r', encoding='utf-8') as f:
+            html_template = f.read()
+        with open('./templates/plan.css', 'r', encoding='utf-8') as f:
+            css_content = f.read()
+        with open('./templates/plan.js', 'r', encoding='utf-8') as f:
+            js_content = f.read()
+    except FileNotFoundError:
+        return "<html><body><h1>Error: Template files not found in ./templates/</h1></body></html>"
     
-    # Add plan rows
+    # Build summary stats HTML
+    summary_stats = f"""
+        <div class="stat-box">
+            <div class="stat-label">Current SOC</div>
+            <div class="stat-value">{plan['battery_soc']:.1f}%</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Battery Size</div>
+            <div class="stat-value">{plan['battery_capacity']:.1f} kWh</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Min Price</div>
+            <div class="stat-value">{plan['statistics']['min']:.2f}p</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Max Price</div>
+            <div class="stat-value">{plan['statistics']['max']:.2f}p</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Avg Price</div>
+            <div class="stat-value">{plan['statistics']['avg']:.2f}p</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Confidence</div>
+            <div class="stat-value">{plan['confidence'].upper()}</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">24h Cost</div>
+            <div class="stat-value">£{plan.get('total_cost', 0):.2f}</div>
+        </div>
+    """
+    
+    # Build plan rows HTML
+    plan_rows = ""
     for step in plan['plan_steps']:
         mode_class = f"mode-{step['mode'].lower().replace(' ', '-')}"
-        pred_marker = " *" if step['is_predicted'] else ""
+        pred_marker = " *" if step.get('is_predicted_price', False) else ""
         
-        html += f"""
-                <tr class="{mode_class}">
-                    <td><strong>{step['time'].strftime('%H:%M')}</strong></td>
-                    <td>{step['mode']}</td>
-                    <td>{step['action']}</td>
-                    <td>{step['soc_end']:.1f}%</td>
-                    <td>{step['solar_pv']:.2f}</td>
-                    <td>{step['import_price']:.2f}p{pred_marker}</td>
-                    <td>{step['export_price']:.2f}p</td>
-                </tr>
-"""
+        # Format cost
+        slot_cost = step.get('cost', 0)
+        cost_str = f"{slot_cost:.2f}p" if slot_cost >= 0 else f"{abs(slot_cost):.2f}p"
+        cost_class = "cost-positive" if slot_cost >= 0 else "cost-negative"
+        
+        # Format cumulative
+        cumulative = step.get('cumulative_cost', 0) / 100
+        cumulative_str = f"£{cumulative:.2f}" if cumulative >= 0 else f"-£{abs(cumulative):.2f}"
+        
+        plan_rows += f"""
+            <tr class="{mode_class}">
+                <td><strong>{step['time'].strftime('%H:%M')}</strong></td>
+                <td>{step['mode']}</td>
+                <td>{step['action']}</td>
+                <td>{step['soc_end']:.1f}%</td>
+                <td>{step.get('solar_kw', 0):.2f}</td>
+                <td>{step['import_price']:.2f}p{pred_marker}</td>
+                <td>{step['export_price']:.2f}p</td>
+                <td class="{cost_class}">{cost_str}</td>
+                <td><strong>{cumulative_str}</strong></td>
+            </tr>
+        """
     
-    html += f"""
-            </tbody>
-        </table>
-        
-        <div class="info-box">
-            <strong>Plan Summary:</strong><br>
-            Known prices: {plan['hours_known']:.1f} hours<br>
-            Predicted prices: {plan['hours_predicted']:.1f} hours<br>
-            Data confidence: {plan['confidence']}<br><br>
-            <strong>Legend:</strong><br>
-            <span style="background: #d4edda; padding: 3px 8px; border-radius: 3px;">Self Use</span> = Normal operation<br>
-            <span style="background: #fff3cd; padding: 3px 8px; border-radius: 3px;">Force Charge</span> = Charging from grid (cheap period)<br>
-            <span style="background: #f8d7da; padding: 3px 8px; border-radius: 3px;">Force Discharge</span> = Selling to grid (expensive period)
-        </div>
-    </div>
+    # Build info summary
+    info_summary = f"""
+        <strong>Plan Summary:</strong><br>
+        Known prices: {plan['hours_known']:.1f} hours<br>
+        Predicted prices: {plan['hours_predicted']:.1f} hours<br>
+        Data confidence: {plan['confidence']}<br>
+        Total estimated cost: £{plan.get('total_cost', 0):.2f}<br><br>
+        <strong>Legend:</strong><br>
+        <span style="background: #d4edda; padding: 3px 8px; border-radius: 3px;">Self Use</span> = Normal operation<br>
+        <span style="background: #fff3cd; padding: 3px 8px; border-radius: 3px;">Force Charge</span> = Charging from grid (cheap period)<br>
+        <span style="background: #f8d7da; padding: 3px 8px; border-radius: 3px;">Force Discharge</span> = Selling to grid (expensive period)
+    """
     
-    <script>
-        // SOC Chart
-        new Chart(document.getElementById('socChart'), {{
-            type: 'line',
-            data: {{
-                labels: {time_labels},
-                datasets: [{{
-                    label: 'State of Charge (%)',
-                    data: {soc_values},
-                    borderColor: '#2ecc71',
-                    backgroundColor: 'rgba(46, 204, 113, 0.1)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: true }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                return context.parsed.y.toFixed(1) + '%';
-                            }}
-                        }}
-                    }}
-                }},
-                scales: {{
-                    y: {{
-                        min: 0,
-                        max: 100,
-                        title: {{ display: true, text: 'SOC (%)' }}
-                    }},
-                    x: {{
-                        title: {{ display: true, text: 'Time' }}
-                    }}
-                }}
-            }}
-        }});
-        
-        // Price Chart
-        new Chart(document.getElementById('priceChart'), {{
-            type: 'line',
-            data: {{
-                labels: {time_labels},
-                datasets: [
-                    {{
-                        label: 'Import Price (pay to charge)',
-                        data: {import_price_values},
-                        borderColor: '#e74c3c',
-                        backgroundColor: 'rgba(231, 76, 60, 0.1)',
-                        borderWidth: 2,
-                        fill: false,
-                        tension: 0.1
-                    }},
-                    {{
-                        label: 'Export Price (earn from discharge)',
-                        data: {export_price_values},
-                        borderColor: '#27ae60',
-                        backgroundColor: 'rgba(39, 174, 96, 0.1)',
-                        borderWidth: 2,
-                        fill: false,
-                        tension: 0.1,
-                        borderDash: [5, 5]
-                    }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: true }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + 'p/kWh';
-                            }}
-                        }}
-                    }}
-                }},
-                scales: {{
-                    y: {{
-                        beginAtZero: false,
-                        title: {{ display: true, text: 'Price (p/kWh)' }}
-                    }},
-                    x: {{
-                        title: {{ display: true, text: 'Time' }}
-                    }}
-                }}
-            }}
-        }});
-        
-        // Solar Chart
-        new Chart(document.getElementById('solarChart'), {{
-            type: 'line',
-            data: {{
-                labels: {time_labels},
-                datasets: [{{
-                    label: 'Solar Generation (kW)',
-                    data: {solar_values},
-                    borderColor: '#f39c12',
-                    backgroundColor: 'rgba(243, 156, 18, 0.2)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: true }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                return context.parsed.y.toFixed(2) + ' kW';
-                            }}
-                        }}
-                    }}
-                }},
-                scales: {{
-                    y: {{
-                        beginAtZero: true,
-                        title: {{ display: true, text: 'Power (kW)' }}
-                    }},
-                    x: {{
-                        title: {{ display: true, text: 'Time' }}
-                    }}
-                }}
-            }}
-        }});
-    </script>
-</body>
-</html>
-"""
+    # Build chart data JSON
+    chart_data = {
+        'timeLabels': time_labels,
+        'socValues': soc_values,
+        'importPrices': import_price_values,
+        'exportPrices': export_price_values,
+        'solarValues': solar_values
+    }
+    
+    # Replace template placeholders
+    html = html_template.replace('{{timestamp}}', plan['timestamp'].strftime('%Y-%m-%d %H:%M:%S'))
+    html = html.replace('{{summary_stats}}', summary_stats)
+    html = html.replace('{{plan_rows}}', plan_rows)
+    html = html.replace('{{info_summary}}', info_summary)
+    html = html.replace('{{chart_data}}', json.dumps(chart_data))
+    
+    # Inline CSS and JS (for single-file serving)
+    html = html.replace('<link rel="stylesheet" href="plan.css">', f'<style>{css_content}</style>')
+    html = html.replace('<script src="plan.js"></script>', f'<script>{js_content}</script>')
     
     return html
     """Generate HTML visualization of the plan"""
     if not plan:
         return "<html><body><h1>Error: No plan generated</h1></body></html>"
     
-    # Build price chart data
-    price_labels = []
-    price_values = []
-    predicted_flags = []
-    
-    for price in plan['prices']:
-        price_labels.append(price['start'].strftime('%H:%M'))
-        price_values.append(price['price'])
-        predicted_flags.append(price.get('is_predicted', False))
-    
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>SolarBat-AI Plan - {plan['timestamp'].strftime('%Y-%m-%d %H:%M')}</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background: #f5f5f5;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #2c3e50;
-            border-bottom: 3px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .summary {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }}
-        .stat-box {{
-            background: #ecf0f1;
-            padding: 15px;
-            border-radius: 5px;
-            border-left: 4px solid #3498db;
-        }}
-        .stat-label {{
-            font-size: 12px;
-            color: #7f8c8d;
-            text-transform: uppercase;
-        }}
-        .stat-value {{
-            font-size: 24px;
-            font-weight: bold;
-            color: #2c3e50;
-            margin-top: 5px;
-        }}
-        .chart {{
-            margin: 30px 0;
-            height: 300px;
-            position: relative;
-        }}
-        .price-table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-        }}
-        .price-table th {{
-            background: #3498db;
-            color: white;
-            padding: 10px;
-            text-align: left;
-        }}
-        .price-table td {{
-            padding: 8px;
-            border-bottom: 1px solid #ddd;
-        }}
-        .price-table tr:hover {{
-            background: #f8f9fa;
-        }}
-        .predicted {{
-            color: #e67e22;
-            font-style: italic;
-        }}
-        .known {{
-            color: #27ae60;
-        }}
-        canvas {{
-            max-width: 100%;
-        }}
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <div class="container">
-        <h1>⚡ SolarBat-AI Optimization Plan</h1>
-        <p>Generated: {plan['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}</p>
-        
-        <div class="summary">
-            <div class="stat-box">
-                <div class="stat-label">Battery SOC</div>
-                <div class="stat-value">{plan['battery_soc']:.1f}%</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Battery Capacity</div>
-                <div class="stat-value">{plan['battery_capacity']:.1f} kWh</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Min Price</div>
-                <div class="stat-value">{plan['statistics']['min']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Max Price</div>
-                <div class="stat-value">{plan['statistics']['max']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Avg Price</div>
-                <div class="stat-value">{plan['statistics']['avg']:.2f}p</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Data Confidence</div>
-                <div class="stat-value">{plan['confidence'].upper()}</div>
-            </div>
-        </div>
-        
-        <h2>📈 24-Hour Price Forecast</h2>
-        <div class="chart">
-            <canvas id="priceChart"></canvas>
-        </div>
-        
-        <h2>📋 Detailed Price Schedule</h2>
-        <table class="price-table">
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Price (p/kWh)</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-"""
-    
-    # Add price rows
-    for i, price in enumerate(plan['prices'][:48]):  # Show 24 hours (48 half-hour slots)
-        is_pred = price.get('is_predicted', False)
-        status_class = 'predicted' if is_pred else 'known'
-        status_text = f"⚠️ Predicted ({price.get('prediction_method', 'unknown')})" if is_pred else "✅ Known"
-        
-        html += f"""
-                <tr>
-                    <td>{price['start'].strftime('%H:%M')} - {price['end'].strftime('%H:%M')}</td>
-                    <td><strong>{price['price']:.2f}p</strong></td>
-                    <td class="{status_class}">{status_text}</td>
-                </tr>
-"""
-    
-    html += f"""
-            </tbody>
-        </table>
-        
-        <div style="margin-top: 30px; padding: 15px; background: #e8f4f8; border-radius: 5px;">
-            <strong>ℹ️ Data Summary:</strong><br>
-            Known prices: {plan['hours_known']:.1f} hours<br>
-            Predicted prices: {plan['hours_predicted']:.1f} hours<br>
-            Overall confidence: {plan['confidence']}
-        </div>
-    </div>
-    
-    <script>
-        const ctx = document.getElementById('priceChart').getContext('2d');
-        
-        const labels = {price_labels[:48]};
-        const data = {price_values[:48]};
-        const predicted = {[str(f).lower() for f in predicted_flags[:48]]};
-        
-        // Color points differently for predicted vs known
-        const pointColors = predicted.map(p => p ? '#e67e22' : '#27ae60');
-        const backgroundColors = predicted.map(p => p ? 'rgba(230, 126, 34, 0.1)' : 'rgba(39, 174, 96, 0.1)');
-        
-        new Chart(ctx, {{
-            type: 'line',
-            data: {{
-                labels: labels,
-                datasets: [{{
-                    label: 'Price (p/kWh)',
-                    data: data,
-                    borderColor: '#3498db',
-                    backgroundColor: 'rgba(52, 152, 219, 0.1)',
-                    pointBackgroundColor: pointColors,
-                    pointBorderColor: pointColors,
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    tension: 0.1,
-                    fill: true
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{
-                        display: true
-                    }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: function(context) {{
-                                const isPred = predicted[context.dataIndex];
-                                const status = isPred ? ' (Predicted)' : ' (Known)';
-                                return context.parsed.y.toFixed(2) + 'p/kWh' + status;
-                            }}
-                        }}
-                    }}
-                }},
-                scales: {{
-                    y: {{
-                        beginAtZero: false,
-                        title: {{
-                            display: true,
-                            text: 'Price (p/kWh)'
-                        }}
-                    }},
-                    x: {{
-                        title: {{
-                            display: true,
-                            text: 'Time'
-                        }}
-                    }}
-                }}
-            }}
-        }});
-    </script>
-</body>
-</html>
-"""
-    
-    return html
-
-
 def start_web_server(plan):
     """Start a simple web server to display the plan"""
     from http.server import HTTPServer, BaseHTTPRequestHandler
