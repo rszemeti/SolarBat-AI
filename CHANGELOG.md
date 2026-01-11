@@ -14,17 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Confidence-weighted predictions** - Combines multiple methods with smart weighting
 - **Future deficit calculation** - Plans ahead to avoid running out of battery
 - **Solar wastage prevention** - Won't charge battery before sunny periods
-- **True arbitrage optimization** - Only charges if cheaper than future prices
+- **True arbitrage optimization** - Charges when import < export for pure profit
+- **Solar clipping prevention** - Discharges battery before high solar if export limited (e.g., 5kW DNO limit)
 - **Smart energy balance** - Considers solar + battery + load holistically
+- **Per-slot cost tracking** - Shows cost/revenue for each 30-min period
+- **Cumulative cost display** - Running total showing exact £ impact
+- **Template-based HTML** - Separate CSS, JS, HTML files for easy customization
 
 ### Changed
 - **Removed dumb threshold logic** - No more "charge if price < X" without considering need
 - **Optimization over simulation** - Generates actual optimal plan, not just threshold reactions
 - **History-based learning** - Uses your actual consumption patterns, not generic assumptions
+- **Priority-based decisions** - Clipping prevention > Arbitrage > Deficit > Wastage > Self-use
 
 ### Technical
 - `load_forecaster.py` - New AI component for consumption prediction
-- `cost_optimizer.py` - New optimization engine for minimal-cost scheduling
+- `cost_optimizer.py` - New optimization engine for minimal-cost scheduling with clipping prevention
+- `templates/` - Separated HTML/CSS/JS for maintainability
 - Home Assistant history API integration for learning
 - Weighted prediction ensemble for robustness
 

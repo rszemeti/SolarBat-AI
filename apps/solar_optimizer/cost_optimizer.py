@@ -82,6 +82,9 @@ class CostOptimizer:
         self.log(f"[OPT] Battery: {battery_capacity}kWh, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
         
         for i, slot in enumerate(slots):
+            # Store future slots for clipping analysis
+            self._future_slots = slots[i:]
+            
             # Calculate energy balance for this slot
             solar_kwh = slot['solar_kw'] * 0.5  # 30 minutes
             load_kwh = slot['load_kw'] * 0.5
@@ -240,12 +243,94 @@ class CostOptimizer:
         # Check if battery is nearly full and solar coming (wastage risk)
         wastage_risk = (current_soc > 80 and future_solar_surplus > 2.0)
         
+        # Check for solar clipping risk
+        # If we have high solar coming and battery is full, we'll clip (waste) solar
+        # Export limit is typically 5kW, so anything above that + load gets clipped
+        export_limit = 5.0  # kW - typical DNO limit
+        clipping_risk = False
+        future_clipping_kwh = 0.0
+        slots_until_clipping = 0
+        
+        # Look ahead to find when clipping will occur and how much
+        for i, future_slot in enumerate(self._future_slots if hasattr(self, '_future_slots') else []):
+            future_solar = future_slot.get('solar_kw', 0)
+            future_load = future_slot.get('load_kw', 0)
+            
+            # Surplus that would need to go somewhere
+            surplus = future_solar - future_load
+            
+            if surplus > export_limit:
+                # We can't export it all - will clip unless battery has space
+                potential_clip = surplus - export_limit
+                
+                # Check if battery will be full by then
+                # Estimate: current SOC + any solar charging between now and then
+                if current_soc > 85:  # If already high, likely to be full
+                    if slots_until_clipping == 0:  # First occurrence
+                        slots_until_clipping = i
+                    clipping_risk = True
+                    future_clipping_kwh += potential_clip * 0.5  # 30 min slot
+        
+        # Calculate if we need to discharge NOW to make space
+        should_discharge_for_clipping = False
+        
+        if clipping_risk and future_clipping_kwh > 0.1:  # More than 0.1kWh will clip
+            # Calculate available battery energy that could be discharged
+            available_kwh = (current_soc - 50) / 100 * battery_capacity  # Don't go below 50%
+            
+            # Calculate how long it takes to discharge what we need
+            # We need to clear at least future_clipping_kwh from battery
+            kwh_to_discharge = min(future_clipping_kwh, available_kwh)
+            
+            if kwh_to_discharge > 0:
+                # How many 30-min slots needed to discharge this?
+                # max_discharge_rate is in kW, so in 30 min we can discharge: rate * 0.5
+                kwh_per_slot = max_discharge_rate * 0.5
+                slots_needed = int(kwh_to_discharge / kwh_per_slot) + 1
+                
+                # Should we start discharging now?
+                # Start if: slots_until_clipping <= slots_needed
+                # This ensures we finish discharging just as clipping period starts
+                if slots_until_clipping <= slots_needed:
+                    should_discharge_for_clipping = True
+        
         # Calculate energy balance for this slot
         net_energy = solar_kwh - load_kwh
         
         # Decision logic
         
-        # 1. If battery low and deficit coming, charge if price reasonable
+        # 0. CLIPPING PREVENTION (HIGHEST PRIORITY): Discharge before high solar if battery full
+        # Better to use/export battery power now than waste solar later
+        if should_discharge_for_clipping and current_soc > 55:
+            mode = 'Force Discharge'
+            hours_until = slots_until_clipping * 0.5
+            action = f"Preventing {future_clipping_kwh:.1f}kWh solar clipping in {hours_until:.1f}h, clearing battery space"
+            # Discharge at max rate
+            discharge_kwh = min(
+                max_discharge_rate * 0.5,
+                (current_soc - 50) / 100 * battery_capacity  # Don't go below 50%
+            )
+            soc_change = -(discharge_kwh / battery_capacity) * 100
+            return mode, action, soc_change
+        
+        # 1. ARBITRAGE OPPORTUNITY: If we can buy cheap and sell expensive later, do it!
+        # With 90% round-trip efficiency:
+        # - Buy 1kWh at Xp, store/retrieve at 90% = 0.9kWh
+        # - Sell 0.9kWh at Yp = revenue
+        # - Need Y > X + (X * 0.11) to profit (covers 10% loss + small margin)
+        # Simplified: if export > import + 1p, it's profitable
+        arbitrage_margin = 1.0  # Minimum 1p profit after round-trip losses
+        profitable_arbitrage = (export_price > import_price + arbitrage_margin)
+        
+        if profitable_arbitrage and current_soc < 92 and not clipping_risk:  # Allow up to 92% for arbitrage
+            mode = 'Force Charge'
+            net_profit = export_price - import_price
+            action = f"Arbitrage opportunity: buy {import_price:.2f}p, sell {export_price:.2f}p = {net_profit:.2f}p profit/kWh"
+            charge_kwh = min(max_charge_rate * 0.5, (max_soc - current_soc) / 100 * battery_capacity)
+            soc_change = (charge_kwh / battery_capacity) * 100
+            return mode, action, soc_change
+        
+        # 2. If battery low and deficit coming, charge if price reasonable
         if current_soc < 30 and needs_charging:
             if import_price <= future_min_price * 1.1:  # Within 10% of future minimum
                 mode = 'Force Charge'
@@ -254,7 +339,7 @@ class CostOptimizer:
                 soc_change = (charge_kwh / battery_capacity) * 100
                 return mode, action, soc_change
         
-        # 2. If wastage risk (battery full, solar coming), DON'T charge
+        # 3. If wastage risk (battery full, solar coming), DON'T charge
         if wastage_risk and current_soc > 70:
             mode = 'Self Use'
             action = f"Avoiding wastage (SOC {current_soc:.0f}%, {future_solar_surplus:.1f}kWh solar coming)"
@@ -262,7 +347,7 @@ class CostOptimizer:
             soc_change = -(load_kwh - solar_kwh) / battery_capacity * 100
             return mode, action, max(-2, soc_change)
         
-        # 3. If export price > import price + margin, discharge
+        # 4. If export price > import price + margin, discharge (was already doing this)
         if export_price > import_price + 2.0 and current_soc > 40:
             mode = 'Force Discharge'
             action = f"Profitable export (earn {export_price:.2f}p vs pay {import_price:.2f}p)"
@@ -270,7 +355,7 @@ class CostOptimizer:
             soc_change = -(discharge_kwh / battery_capacity) * 100
             return mode, action, soc_change
         
-        # 4. Otherwise, self-use mode
+        # 5. Otherwise, self-use mode
         mode = 'Self Use'
         
         if solar_kwh > load_kwh + 0.1:
