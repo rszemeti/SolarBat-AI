@@ -1,0 +1,218 @@
+# Complete Solar Optimizer Dashboard
+# Add this to your Home Assistant dashboard configuration
+
+type: vertical-stack
+cards:
+  # Wastage Alert Card (shows when solar will be wasted)
+  - type: conditional
+    conditions:
+      - entity: sensor.solar_wastage_risk
+        state_not: "0.0"
+    card:
+      type: markdown
+      content: |
+        ## ⚠️ Solar Wastage Risk Detected!
+        
+        **{{ states('sensor.solar_wastage_risk') }} kWh** of solar may be wasted today
+        
+        **Estimated Value:** {{ state_attr('sensor.solar_wastage_risk', 'wastage_value') }}
+        
+        **Recommendation:** Discharge {{ state_attr('sensor.solar_wastage_risk', 'recommended_discharge') }} kWh early morning
+        
+        **Current Battery:** {{ state_attr('sensor.solar_wastage_risk', 'battery_soc') }}%
+        
+        **Alert Level:** {{ state_attr('sensor.solar_wastage_risk', 'alert_level') | upper }}
+      card_mod:
+        style: |
+          ha-card {
+            background: linear-gradient(to right, #ff6b6b, #ffa502);
+            color: white;
+            border-left: 5px solid #ff0000;
+          }
+  
+  # Next Action Card
+  - type: markdown
+    content: |
+      ## 🎯 Next Action
+      
+      **Mode:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').mode if state_attr('sensor.solar_optimizer_plan', 'next_action') else 'Loading...' }}
+      
+      **Reason:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').reason if state_attr('sensor.solar_optimizer_plan', 'next_action') else 'Generating plan...' }}
+      
+      **Time:** {{ as_timestamp(state_attr('sensor.solar_optimizer_plan', 'next_action').timestamp) | timestamp_custom('%H:%M') if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}
+      
+      **Battery:** {{ state_attr('sensor.solar_optimizer_plan', 'next_action').battery_soc_start | round(0) if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}% → {{ state_attr('sensor.solar_optimizer_plan', 'next_action').battery_soc_end | round(0) if state_attr('sensor.solar_optimizer_plan', 'next_action') else '-' }}%
+      
+      {% if state_attr('sensor.solar_optimizer_plan', 'wastage_alert') %}
+      ⚠️ **Pre-emptive discharge planned** ({{ state_attr('sensor.solar_optimizer_plan', 'preemptive_discharge_hours') }} hours)
+      {% endif %}
+  
+  # 24h Plan Summary
+  - type: markdown
+    content: |
+      ## 📋 24-Hour Plan Summary
+      
+      **Generated:** {{ as_timestamp(state_attr('sensor.solar_optimizer_plan', 'generated_at')) | timestamp_custom('%H:%M') if state_attr('sensor.solar_optimizer_plan', 'generated_at') else 'Not generated' }}
+      
+      **Estimated Cost:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_estimated_cost if state_attr('sensor.solar_optimizer_plan', 'summary') else '£0.00' }}
+      
+      ### Mode Distribution
+      {% set modes = state_attr('sensor.solar_optimizer_plan', 'summary').mode_hours if state_attr('sensor.solar_optimizer_plan', 'summary') else {} %}
+      {% if modes.get('Self Use') %}- 🔋 Self Use: {{ modes['Self Use'] }}h{% endif %}
+      {% if modes.get('Grid First') %}- ⚡ Grid First: {{ modes['Grid First'] }}h{% endif %}
+      {% if modes.get('Force Charge') %}- 🔌 Force Charge: {{ modes['Force Charge'] }}h{% endif %}
+      
+      **Battery Range:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').min_battery_soc if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }}% - {{ state_attr('sensor.solar_optimizer_plan', 'summary').max_battery_soc if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }}%
+      
+      **Expected Solar:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_solar_expected if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }} kWh
+      
+      **Expected Consumption:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_consumption_expected if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }} kWh
+  
+  # Detailed Plan Chart (requires apexcharts-card from HACS)
+  - type: custom:apexcharts-card
+    header:
+      show: true
+      title: 24-Hour Optimization Plan
+      show_states: false
+    graph_span: 24h
+    span:
+      start: hour
+    now:
+      show: true
+      label: Now
+      color: red
+    apex_config:
+      chart:
+        height: 400
+      legend:
+        show: true
+    series:
+      # Battery SOC
+      - entity: sensor.solar_optimizer_plan
+        data_generator: |
+          return entity.attributes.plan ? entity.attributes.plan.map((h) => {
+            return [new Date(h.timestamp).getTime(), h.battery_soc_end];
+          }) : [];
+        name: Battery %
+        type: line
+        stroke_width: 3
+        color: green
+        yaxis_id: soc
+        
+      # Agile Price (30-min slots as bars)
+      - entity: sensor.solar_optimizer_plan
+        data_generator: |
+          const data = [];
+          if (!entity.attributes.plan) return data;
+          entity.attributes.plan.forEach((h) => {
+            const time = new Date(h.timestamp).getTime();
+            // First 30-min slot
+            data.push([time, h.price_slot_1]);
+            // Second 30-min slot
+            if (h.price_slot_2) {
+              data.push([time + 30*60*1000, h.price_slot_2]);
+            }
+          });
+          return data;
+        name: Agile Price (30min)
+        type: column
+        yaxis_id: price
+        color: orange
+        
+      # Hour average price overlay
+      - entity: sensor.solar_optimizer_plan
+        data_generator: |
+          return entity.attributes.plan ? entity.attributes.plan.map((h) => {
+            return [new Date(h.timestamp).getTime(), h.price_avg];
+          }) : [];
+        name: Hour Avg Price
+        type: line
+        stroke_width: 2
+        yaxis_id: price
+        color: red
+        curve: smooth
+        
+      # Solar forecast
+      - entity: sensor.solar_optimizer_plan
+        data_generator: |
+          return entity.attributes.plan ? entity.attributes.plan.map((h) => {
+            return [new Date(h.timestamp).getTime(), h.expected_solar];
+          }) : [];
+        name: Solar (kWh)
+        type: area
+        yaxis_id: energy
+        color: yellow
+        opacity: 0.3
+        
+      # Mode indicator
+      - entity: sensor.solar_optimizer_plan
+        data_generator: |
+          return entity.attributes.plan ? entity.attributes.plan.map((h) => {
+            const modes = {'Self Use': 40, 'Grid First': 70, 'Force Charge': 100};
+            return [new Date(h.timestamp).getTime(), modes[h.mode] || 40];
+          }) : [];
+        name: Mode
+        type: line
+        stroke_width: 4
+        curve: stepline
+        yaxis_id: mode
+        color: purple
+    
+    yaxis:
+      - id: soc
+        min: 0
+        max: 100
+        decimals: 0
+        apex_config:
+          title:
+            text: Battery %
+      - id: price
+        opposite: true
+        decimals: 1
+        apex_config:
+          title:
+            text: Price (p/kWh)
+      - id: energy
+        show: false
+      - id: mode
+        show: false
+  
+  # Inverter Capabilities Card
+  - type: entities
+    title: Inverter Capabilities
+    show_header_toggle: false
+    entities:
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: battery_capacity
+        name: Battery Capacity
+        suffix: kWh
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: max_charge_rate
+        name: Max Charge Rate
+        suffix: kW
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: max_discharge_rate
+        name: Max Discharge Rate
+        suffix: kW
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: inverter_max_power
+        name: Inverter Max Power
+        suffix: kW
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: grid_export_limit
+        name: Grid Export Limit
+        suffix: kW
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: charge_efficiency
+        name: Round-trip Efficiency
+        suffix: "%"
+      - entity: sensor.solar_optimizer_capabilities
+        type: attribute
+        attribute: last_updated
+        name: Last Updated

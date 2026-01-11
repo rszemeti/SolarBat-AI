@@ -1,0 +1,22 @@
+# Plan Summary Card
+# Shows overall 24-hour plan statistics
+
+type: markdown
+content: |
+  ## 📋 24-Hour Plan
+  
+  **Generated:** {{ as_timestamp(state_attr('sensor.solar_optimizer_plan', 'generated_at')) | timestamp_custom('%H:%M') if state_attr('sensor.solar_optimizer_plan', 'generated_at') else 'Not generated' }}
+  
+  **Estimated Cost:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_estimated_cost if state_attr('sensor.solar_optimizer_plan', 'summary') else '£0.00' }}
+  
+  ### Mode Distribution
+  {% set modes = state_attr('sensor.solar_optimizer_plan', 'summary').mode_hours if state_attr('sensor.solar_optimizer_plan', 'summary') else {} %}
+  {% if modes.get('Self Use') %}- Self Use: {{ modes['Self Use'] }}h{% endif %}
+  {% if modes.get('Grid First') %}- Grid First: {{ modes['Grid First'] }}h{% endif %}
+  {% if modes.get('Force Charge') %}- Force Charge: {{ modes['Force Charge'] }}h{% endif %}
+  
+  **Battery Range:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').min_battery_soc if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }}% - {{ state_attr('sensor.solar_optimizer_plan', 'summary').max_battery_soc if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }}%
+  
+  **Solar Expected:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_solar_expected if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }} kWh
+  
+  **Consumption Expected:** {{ state_attr('sensor.solar_optimizer_plan', 'summary').total_consumption_expected if state_attr('sensor.solar_optimizer_plan', 'summary') else 0 }} kWh
