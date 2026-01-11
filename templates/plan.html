@@ -37,6 +37,32 @@
         </div>
         
         <h2>Detailed Plan</h2>
+        
+        <div style="background: #e8f4f8; padding: 12px; border-radius: 5px; margin-bottom: 15px; font-size: 14px;">
+            <strong>💡 Mode Strategy:</strong> Feed-in Priority is a <strong>strategic morning decision</strong> for high solar days. 
+            When forecast shows solar will exceed battery capacity, the system switches to grid-first routing from dawn through peak solar, 
+            preventing clipping without battery cycling. It's not a reactive fix—it's planned ahead!
+        </div>
+        
+        <div class="mode-legend">
+            <div class="mode-legend-item">
+                <div class="mode-legend-box" style="background: #d4edda;"></div>
+                <span class="mode-legend-text">Self Use (battery first)</span>
+            </div>
+            <div class="mode-legend-item">
+                <div class="mode-legend-box" style="background: #fff3cd;"></div>
+                <span class="mode-legend-text">Force Charge (cheap import)</span>
+            </div>
+            <div class="mode-legend-item">
+                <div class="mode-legend-box" style="background: #f8d7da;"></div>
+                <span class="mode-legend-text">Force Discharge (profitable export)</span>
+            </div>
+            <div class="mode-legend-item">
+                <div class="mode-legend-box" style="background: #cfe2ff; border-left: 3px solid #0d6efd;"></div>
+                <span class="mode-legend-text">⚡ Feed-in Priority (strategic grid-first routing for high solar days)</span>
+            </div>
+        </div>
+        
         <table class="plan-table">
             <thead>
                 <tr>

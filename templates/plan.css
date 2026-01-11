@@ -99,15 +99,49 @@ canvas {
 
 /* Mode Color Coding */
 .mode-self-use {
-    background: #d4edda;
+    background: #d4edda; /* Light green - normal operation */
 }
 
 .mode-force-charge {
-    background: #fff3cd;
+    background: #fff3cd; /* Light yellow - charging */
 }
 
 .mode-force-discharge {
-    background: #f8d7da;
+    background: #f8d7da; /* Light red - discharging */
+}
+
+.mode-feed-in-priority {
+    background: #cfe2ff; /* Light blue - grid-first routing */
+    border-left: 3px solid #0d6efd;
+}
+
+/* Mode Legend */
+.mode-legend {
+    display: flex;
+    gap: 15px;
+    margin: 20px 0;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 5px;
+    flex-wrap: wrap;
+}
+
+.mode-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mode-legend-box {
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    border: 1px solid #ddd;
+}
+
+.mode-legend-text {
+    font-size: 13px;
+    color: #333;
 }
 
 /* Cost Colors */

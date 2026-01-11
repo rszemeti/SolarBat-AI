@@ -1,42 +1,80 @@
-# SolarBat-AI v2.0
+# SolarBat-AI v2.3
 
 Intelligent battery management for solar + storage systems with Octopus Agile pricing.
 
 **Built for the Home Assistant community to optimize solar battery systems and maximize savings with time-of-use electricity tariffs.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-2.0.0-green.svg)
+![Version](https://img.shields.io/badge/version-2.3.0-green.svg)
 ![HA](https://img.shields.io/badge/Home%20Assistant-AppDaemon-blue.svg)
 
 ---
 
 ## 🌟 Features
 
-- ✅ **24-Hour Optimization Planning** - Full day lookahead with hourly strategy
-- ✅ **Pre-emptive Discharge** - Automatically drains battery before solar overflow to prevent wastage
-- ✅ **Octopus Agile Aware** - Optimizes for 30-minute pricing slots
-- ✅ **Auto Capability Detection** - Reads inverter limits (charge/discharge rates, export limits)
-- ✅ **Historical Learning** - Adapts to your actual consumption patterns and solar forecast accuracy
-- ✅ **Zero Inverter Spam** - Configurable minimum interval between mode changes
-- ✅ **Export Tariff Support** - Handles Agile Export or similar tariffs
-- ✅ **Transparency** - Clear logging and dashboard showing all decisions and reasoning
+### Core Optimization
+- ✅ **24-Hour AI Planning** - ML-powered load forecasting with confidence scoring
+- ✅ **Smart Clipping Prevention** - Uses mode switch to prioritize grid export (no battery cycling!)
+- ✅ **Arbitrage Trading** - Buy cheap, sell expensive automatically
+- ✅ **Zero Solar Waste** - Intelligent mode switching prevents clipping losses
+
+### Architecture (v2.3)
+- ✅ **Provider-Based Design** - Clean separation: data sources → optimization → execution
+- ✅ **Fully Testable** - Each component isolated and independently testable
+- ✅ **Swappable Components** - Easy to add new tariffs, inverters, or forecasting methods
+- ✅ **Health Monitoring** - Every data source reports status and confidence
+
+### Intelligence
+- ✅ **AI Load Forecasting** - Multi-method prediction (yesterday, last week, trends, averages)
+- ✅ **Price Prediction** - Handles 4pm Agile price gap with historical learning
+- ✅ **Cost Tracking** - Per-slot and cumulative cost/revenue tracking
+- ✅ **Confidence Scoring** - Know when data is reliable vs uncertain
+
+### Control
+- ✅ **Three-Way Control System:**
+  - **Timed Charge Slots** - Cheap import (Agile pricing)
+  - **Timed Discharge Slots** - Profitable export 
+  - **Mode Switch** - Solar routing (battery-first vs grid-first)
+- ✅ **Minimal Writes** - Only updates inverter when plan differs from actual
+- ✅ **Smart Execution** - Compares plan to reality before writing
 
 ---
 
-## 📋 What's New in v2.0
+## 📋 What's New in v2.3
 
-### Major Improvements
-- **30-minute Agile pricing support** - Fully aware of half-hourly price variations
-- **Dynamic inverter capability detection** - Auto-reads charge/discharge limits from inverter
-- **Pre-emptive discharge optimization** - Prevents solar wastage by strategically draining battery
-- **Enhanced wastage detection** - Calculates expected solar overflow accounting for export limits
-- **Round-trip efficiency modeling** - Accounts for charge/discharge losses in cost calculations
-- **Improved price analysis** - Compares current prices against historical medians
+### Major Architecture Refactor
+**Clean Provider/Consumer Pattern:**
+```
+Data Providers → Plan Creator → Plan Executor → Inverter
+```
 
-### Breaking Changes from v1.x
-- Configuration structure updated (see Migration Guide)
-- Requires additional sensor entities for capability detection
-- History file format changed (will auto-upgrade on first run)
+### New Components
+- **5 Independent Data Providers:**
+  - ImportPricingProvider (Octopus Agile with prediction)
+  - ExportPricingProvider (Fixed or dynamic export rates)
+  - SolarForecastProvider (Solcast integration)
+  - LoadForecastProvider (AI consumption prediction)
+  - SystemStateProvider (Current inverter/battery state)
+
+- **PlanCreator** - Pure optimization engine (no HA dependencies)
+- **PlanExecutor** - Smart inverter control (writes only when needed)
+
+### Breakthrough: Mode Switch Integration
+**Clipping Prevention Without Battery Cycling:**
+
+**OLD (v2.2):** Discharge battery to make room → wasteful cycling
+**NEW (v2.3):** Switch to "Feed-in Priority" mode → solar goes to grid first!
+
+When battery is full and high solar is coming:
+- Switches inverter mode to prioritize grid export
+- Solar flows: Grid (5kW) → Battery (overflow)
+- **Zero clipping, minimal battery wear!**
+
+### Benefits
+- ✅ **Testable** - Mock any provider, test optimization in isolation
+- ✅ **Maintainable** - Change one component without touching others
+- ✅ **Extensible** - Add new tariffs or inverters easily
+- ✅ **Observable** - Health status for every data source
 
 ---
 
@@ -48,6 +86,7 @@ Intelligent battery management for solar + storage systems with Octopus Agile pr
 2. **Solax ModBus Integration** - For Solis/Solax inverter control
    - Provides battery, inverter, and power sensors
    - Required for timed charge/discharge slot control
+   - **NEW:** Energy Storage Control Mode Switch support
 3. **Octopus Energy Integration** (Official HACS integration)
    - Provides Agile pricing data
 4. **Solcast Solar Integration** (HACS)
@@ -57,15 +96,19 @@ Intelligent battery management for solar + storage systems with Octopus Agile pr
 
 **Inverters:** 
 - ✅ **Solis S6 Hybrid** (via solax_modbus) - Fully tested
+- ✅ **Solis S6 with Mode Switch** - NEW in v2.3!
 - ✅ Other Solis models with timed slot support (via solax_modbus)
 - ⚠️ Solax inverters (should work but untested)
 - 🔄 Other brands - Need custom interface implementation
 
-**Note:** The system uses an abstraction layer, so other inverter brands can be supported by implementing a custom interface class.
+**Mode Switch Support:**
+The v2.3 architecture uses the inverter's **Energy Storage Control Mode Switch** for intelligent solar routing:
+- `Self-Use - No Timed Charge/Discharge` → Solar to battery first
+- `Feed-in priority` → Solar to grid first (clipping prevention!)
 
 **Tariffs:**
 - ✅ Octopus Agile (Import) - Required
-- ✅ Octopus Agile Export - Optional
+- ✅ Octopus Agile Export - Optional (or fixed export rate)
 
 ---
 
@@ -169,42 +212,160 @@ Add these cards to your dashboard:
 
 ---
 
+## 🏗️ Architecture (v2.3)
+
+### Clean Separation of Concerns
+
+```
+┌──────────────────────────────────────────┐
+│        DATA PROVIDERS (5)                │
+│  ────────────────────────────────────    │
+│  Import Pricing  (Octopus Agile + AI)    │
+│  Export Pricing  (Fixed or dynamic)      │
+│  Solar Forecast  (Solcast)               │
+│  Load Forecast   (AI multi-method)       │
+│  System State    (Inverter readings)     │
+└──────────────────────────────────────────┘
+              ↓
+┌──────────────────────────────────────────┐
+│         PLAN CREATOR                     │
+│  Pure optimization logic                 │
+│  No HA dependencies                      │
+│  Fully testable                          │
+└──────────────────────────────────────────┘
+              ↓
+         Plan Object
+         (48 x 30-min slots)
+              ↓
+┌──────────────────────────────────────────┐
+│        PLAN EXECUTOR                     │
+│  Compares plan vs actual                 │
+│  Writes only when different              │
+│  Minimal inverter updates                │
+└──────────────────────────────────────────┘
+```
+
+### Benefits
+- **Testable:** Mock any provider to test optimization in isolation
+- **Maintainable:** Change pricing logic without touching inverter control
+- **Extensible:** Add new tariffs by creating a new provider
+- **Observable:** Health status for each data source
+
+---
+
 ## 🎯 How It Works
+
+### Three-Way Control System
+
+v2.3 uses a sophisticated three-way control strategy:
+
+#### 1. Timed Charge Slots
+```
+When: Cheap import prices (arbitrage opportunities)
+Control: number.solis_inverter_timed_charge_*
+Effect: Grid charges battery to target SOC
+Example: 02:00-02:30 charge to 90% at 13.27p/kWh
+```
+
+#### 2. Timed Discharge Slots
+```
+When: High export prices OR profitable arbitrage
+Control: number.solis_inverter_timed_discharge_*
+Effect: Battery discharges to grid at max rate
+Example: 16:00-16:30 discharge to 20% at 25p/kWh
+```
+
+#### 3. Mode Switch (NEW in v2.3!)
+```
+Entity: select.solis_inverter_energy_storage_control_switch
+
+Self-Use Mode:
+  Solar → Battery first → Overflow to grid
+  Use: Normal operation, battery has capacity
+  
+Feed-in Priority Mode:
+  Solar → Grid first → Overflow to battery
+  Use: Clipping prevention when battery full!
+```
 
 ### Decision Priority
 
 The optimizer makes decisions in this priority order:
 
-1. **Pre-emptive Discharge** - If solar will be wasted, discharge battery (Force Discharge if available, else Self Use with consumption drain)
-2. **Force Charge** - Charge from grid during negative or very cheap pricing (<3p/kWh)
-3. **Grid First** - Use grid power during cheap periods, save battery for expensive times
-4. **Self Use** - Standard battery operation - use solar and battery to avoid grid import
+1. **Clipping Prevention (Mode Switch)** - Battery full + high solar coming? Switch to Feed-in Priority to route solar to grid first
+2. **Arbitrage Trading** - Buy cheap (13p), sell expensive (25p) = profit!
+3. **Deficit Prevention** - Charge if battery low and expensive prices ahead
+4. **Wastage Prevention** - Don't charge before big solar day
+5. **Self Use (Default)** - Normal operation, battery-first solar routing
 
-### Inverter Modes
+### Clipping Prevention: The Breakthrough
 
-| Mode | Description | When Used |
-|------|-------------|-----------|
-| **Force Discharge** | Actively discharge battery to grid at max rate | Pre-emptive discharge when wastage detected (if inverter supports it) |
-| **Force Charge** | Charge battery from grid at max rate | Negative pricing, very cheap electricity |
-| **Grid First** | Use grid power, don't discharge battery | Cheap periods with good solar forecast |
-| **Self Use** | Use solar + battery, minimize grid import | Default mode, expensive periods |
+**The Problem:**
+```
+Battery: 95% full (0.5kWh space remaining)
+Solar:   9kW arriving in 2 hours
+Export:  5kW DNO limit
+Result:  4kW clipped! ❌
+```
 
-**Note:** Not all inverters support Force Discharge mode. If unavailable, pre-emptive discharge uses Self Use mode and relies on household consumption to drain the battery (slower but still effective).
+**OLD Solution (v2.2):**
+```
+1. Force Discharge: 95% → 50%
+2. Solar arrives: charges 50% → 95%
+Result: ✓ No clipping, but battery cycled unnecessarily
+```
 
-### Pre-emptive Discharge Logic
+**NEW Solution (v2.3 - Mode Switch):**
+```
+1. Switch to "Feed-in Priority" mode
+2. Solar arrives (9kW):
+   - 5kW → Grid (DNO limit)
+   - 4kW → Battery (fills 95% → 99%)
+3. Switch back to "Self-Use" when full
+Result: ✓ No clipping, minimal battery wear! 🎉
+```
 
-The most innovative feature - prevents solar wastage:
+### Inverter Modes (v2.3)
+
+| Control Type | Purpose | When Used |
+|--------------|---------|-----------|
+| **Timed Charge Slot** | Buy cheap import | Negative/low Agile prices (<15p) |
+| **Timed Discharge Slot** | Sell high export | Profitable arbitrage (export > import + 1p) |
+| **Feed-in Priority Mode** | Route solar to grid first | Clipping prevention (battery full + high solar) |
+| **Self Use Mode** | Battery-first solar routing | Default operation |
+
+### AI Load Forecasting
+
+Multi-method ensemble prediction:
 
 ```
-Morning (6am):
-  - Battery: 85%
-  - Forecast: 25kWh solar today
-  - Expected consumption: 15kWh
-  - Battery space: 1.5kWh
-  
-  Problem: 25kWh solar > 1.5kWh space + 15kWh consumption
-  Solution: Discharge 5kWh between 6-9am
-  Result: Battery ready to absorb solar, nothing wasted
+┌────────────────────────────────────┐
+│  Yesterday same time    (weight 3) │
+│  Last week same time    (weight 2) │  → Weighted
+│  30-day hour average    (weight 1) │     Average
+│  Recent trend analysis  (weight 1.5)│
+└────────────────────────────────────┘
+         ↓
+   Confidence Score
+   (high/medium/low/very_low)
+```
+
+### Cost Optimization Logic
+
+**Example Decision Tree:**
+```
+Battery 45%, Solar 2kW, Load 1kW
+Import 13.27p, Export 15.00p
+
+1. Check arbitrage: 15.00p > 13.27p + 1.0p ✓
+   → Force Charge (buy cheap, sell expensive later!)
+   
+2. Solar surplus: 2kW - 1kW = 1kW
+   → Charge from solar simultaneously
+   
+3. Net result: Battery charges, cost = 13.27p for grid import
+   → Later export at 15.00p = 1.73p profit per kWh!
+```
 ```
 
 ### Learning and Adaptation

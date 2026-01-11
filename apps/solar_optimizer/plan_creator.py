@@ -43,24 +43,111 @@ class PlanCreator:
                    load_forecast: List[Dict],
                    system_state: Dict) -> Dict:
         """
-        Generate optimal 24-hour plan.
+        Create optimal plan from provider data.
         
         Args:
-            prices: Import price forecast (list of dicts with 'start', 'price')
-            solar_forecast: Solar generation forecast (list with 'period_end', 'pv_estimate')
-            load_forecast: Load forecast (list with 'time', 'load_kw')
-            battery_soc: Current battery SOC (%)
-            battery_capacity: Battery capacity (kWh)
-            max_charge_rate: Max charge power (kW)
-            max_discharge_rate: Max discharge power (kW)
-            export_price: Export price (p/kWh)
-            min_soc: Minimum SOC to maintain (%)
-            max_soc: Maximum SOC to charge to (%)
+            import_prices: [{'time': datetime, 'price': float, 'is_predicted': bool}]
+            export_prices: [{'time': datetime, 'price': float}]
+            solar_forecast: [{'time': datetime, 'kw': float}]
+            load_forecast: [{'time': datetime, 'kw': float, 'confidence': str}]
+            system_state: {'current_state': {...}, 'capabilities': {...}}
             
         Returns:
-            List of plan steps with mode, action, SOC for each slot
+            Plan dict with slots and metadata
         """
-        self.log("[OPT] Generating optimal plan...")
+        self.log("Creating optimal plan from provider data...")
+        
+        # Extract system state
+        current_state = system_state.get('current_state', {})
+        capabilities = system_state.get('capabilities', {})
+        
+        battery_soc = current_state.get('battery_soc', 50.0)
+        battery_capacity = capabilities.get('battery_capacity', 10.0)
+        max_charge_rate = capabilities.get('max_charge_rate', 3.0)
+        max_discharge_rate = capabilities.get('max_discharge_rate', 3.0)
+        
+        # Get export price (use first from list, they should all be same if fixed)
+        export_price_value = export_prices[0]['price'] if export_prices else 15.0
+        
+        self.log(f"Starting SOC: {battery_soc:.1f}%")
+        self.log(f"Battery: {battery_capacity}kWh, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
+        
+        # Convert provider format to internal format for _optimize
+        # Import prices: {'time': dt, 'price': float} -> {'start': dt, 'price': float}
+        prices_internal = [{'start': p['time'], 'price': p['price'], 'is_predicted': p.get('is_predicted', False)} 
+                          for p in import_prices]
+        
+        # Solar: {'time': dt, 'kw': float} -> {'period_end': dt, 'pv_estimate': float}
+        solar_internal = [{'period_end': s['time'], 'pv_estimate': s['kw']} 
+                         for s in solar_forecast]
+        
+        # Load: already correct format {'time': dt, 'load_kw': float}
+        load_internal = load_forecast
+        
+        # Call internal optimizer (existing logic)
+        plan_slots = self._optimize_internal(
+            prices=prices_internal,
+            solar_forecast=solar_internal,
+            load_forecast=load_internal,
+            battery_soc=battery_soc,
+            battery_capacity=battery_capacity,
+            max_charge_rate=max_charge_rate,
+            max_discharge_rate=max_discharge_rate,
+            export_price=export_price_value,
+            min_soc=10.0,
+            max_soc=95.0
+        )
+        
+        # Build proper plan object
+        total_cost = plan_slots[-1].get('cumulative_cost', 0) / 100 if plan_slots else 0.0
+        
+        plan = {
+            'timestamp': datetime.now(),
+            'slots': plan_slots,
+            'metadata': {
+                'total_cost': total_cost,
+                'confidence': self._calculate_confidence(import_prices, load_forecast),
+                'data_sources': {
+                    'import_prices': len(import_prices),
+                    'export_prices': len(export_prices),
+                    'solar_forecast': len(solar_forecast),
+                    'load_forecast': len(load_forecast)
+                },
+                'charge_slots': sum(1 for s in plan_slots if s['mode'] == 'Force Charge'),
+                'discharge_slots': sum(1 for s in plan_slots if s['mode'] == 'Force Discharge')
+            }
+        }
+        
+        self.log(f"Plan complete: {plan['metadata']['charge_slots']} charge, "
+                f"{plan['metadata']['discharge_slots']} discharge, cost: £{total_cost:.2f}")
+        
+        return plan
+    
+    def _calculate_confidence(self, import_prices: List[Dict], load_forecast: List[Dict]) -> str:
+        """Calculate overall confidence"""
+        predicted = sum(1 for p in import_prices if p.get('is_predicted', False))
+        if predicted < 10:
+            return 'high'
+        elif predicted < 20:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def _optimize_internal(self,
+                          prices: List[Dict],
+                          solar_forecast: List[Dict],
+                          load_forecast: List[Dict],
+                          battery_soc: float,
+                          battery_capacity: float,
+                          max_charge_rate: float,
+                          max_discharge_rate: float,
+                          export_price: float = 15.0,
+                          min_soc: float = 10.0,
+                          max_soc: float = 95.0) -> List[Dict]:
+        """
+        Internal optimization logic with strategic Feed-in Priority mode.
+        """
+        self.log("Generating optimal plan...")
         
         plan = []
         current_soc = battery_soc
@@ -68,9 +155,20 @@ class PlanCreator:
         # Align all forecasts to 30-min slots
         slots = self._align_forecasts(prices, solar_forecast, load_forecast)
         
-        self.log(f"[OPT] Planning for {len(slots)} slots")
-        self.log(f"[OPT] Starting SOC: {current_soc:.1f}%")
-        self.log(f"[OPT] Battery: {battery_capacity}kWh, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
+        self.log(f"Planning for {len(slots)} slots")
+        self.log(f"Starting SOC: {current_soc:.1f}%")
+        self.log(f"Battery: {battery_capacity}kWh, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
+        
+        # ============================================
+        # STRATEGIC DECISION: Should we use Feed-in Priority mode today?
+        # ============================================
+        feed_in_priority_strategy = self._should_use_feed_in_priority_strategy(
+            slots, current_soc, battery_capacity, export_limit=5.0
+        )
+        
+        if feed_in_priority_strategy['use_strategy']:
+            self.log(f"📊 STRATEGIC DECISION: Feed-in Priority mode {feed_in_priority_strategy['start_time'].strftime('%H:%M')}-{feed_in_priority_strategy['end_time'].strftime('%H:%M')}")
+            self.log(f"   Reason: {feed_in_priority_strategy['reason']}")
         
         for i, slot in enumerate(slots):
             # Store future slots for clipping analysis
@@ -153,6 +251,97 @@ class PlanCreator:
         
         return plan
     
+        
+        return plan
+    
+    def _should_use_feed_in_priority_strategy(self, slots: List[Dict], current_soc: float, 
+                                               battery_capacity: float, export_limit: float = 5.0) -> Dict:
+        """
+        Strategic decision: Should we start the day in Feed-in Priority mode?
+        
+        This is a MORNING STRATEGY decision, not a reactive last-minute fix.
+        
+        Logic:
+        1. Look at today's total solar forecast
+        2. Calculate available battery space
+        3. Estimate consumption
+        4. If solar surplus >> battery space → Use Feed-in Priority from morning
+        
+        Returns:
+            Dict with:
+                - use_strategy: bool
+                - start_time: datetime (when to start)
+                - end_time: datetime (when to switch back to Self-Use)
+                - reason: str (explanation)
+        """
+        # Calculate total solar expected today (next 12 hours, 6am-6pm typically)
+        now = datetime.now()
+        morning_start = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if now.hour >= 6:
+            morning_start = now  # If already past 6am, start from now
+        
+        evening_end = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        
+        total_solar_kwh = 0
+        total_load_kwh = 0
+        peak_solar_kw = 0
+        
+        for slot in slots:
+            slot_time = slot['time']
+            if morning_start <= slot_time <= evening_end:
+                solar_kw = slot.get('solar_kw', 0)
+                load_kw = slot.get('load_kw', 0)
+                
+                total_solar_kwh += solar_kw * 0.5
+                total_load_kwh += load_kw * 0.5
+                peak_solar_kw = max(peak_solar_kw, solar_kw)
+        
+        # Calculate battery headroom
+        battery_headroom_kwh = ((95 - current_soc) / 100) * battery_capacity
+        
+        # Calculate net surplus (after consumption)
+        net_solar_surplus = total_solar_kwh - total_load_kwh
+        
+        # Will we clip?
+        # If net surplus > battery headroom AND peak solar > export limit
+        # Then we should use Feed-in Priority strategy
+        
+        will_clip = (net_solar_surplus > battery_headroom_kwh + 2.0 and  # 2kWh margin
+                     peak_solar_kw > export_limit)
+        
+        if will_clip:
+            # Find when solar starts (first slot > 1kW)
+            strategy_start = None
+            for slot in slots:
+                if slot.get('solar_kw', 0) > 1.0:
+                    strategy_start = slot['time']
+                    break
+            
+            # Find when solar drops below 3kW (switch back to Self-Use)
+            strategy_end = evening_end
+            peak_passed = False
+            for i, slot in enumerate(slots):
+                solar_kw = slot.get('solar_kw', 0)
+                if solar_kw > 4.0:
+                    peak_passed = True
+                if peak_passed and solar_kw < 3.0:
+                    strategy_end = slot['time']
+                    break
+            
+            return {
+                'use_strategy': True,
+                'start_time': strategy_start or morning_start,
+                'end_time': strategy_end,
+                'reason': f"High solar day: {total_solar_kwh:.1f}kWh solar, {battery_headroom_kwh:.1f}kWh battery space, {net_solar_surplus:.1f}kWh surplus → Feed-in Priority from morning"
+            }
+        else:
+            return {
+                'use_strategy': False,
+                'start_time': None,
+                'end_time': None,
+                'reason': f"No clipping risk: {total_solar_kwh:.1f}kWh solar fits in {battery_headroom_kwh:.1f}kWh space"
+            }
+    
     def _align_forecasts(self, prices, solar_forecast, load_forecast) -> List[Dict]:
         """Align all forecasts to common 30-min time slots"""
         slots = []
@@ -234,75 +423,23 @@ class PlanCreator:
         # Check if battery is nearly full and solar coming (wastage risk)
         wastage_risk = (current_soc > 80 and future_solar_surplus > 2.0)
         
-        # Check for solar clipping risk
-        # If we have high solar coming and battery is full, we'll clip (waste) solar
-        # Export limit is typically 5kW, so anything above that + load gets clipped
-        export_limit = 5.0  # kW - typical DNO limit
-        clipping_risk = False
-        future_clipping_kwh = 0.0
-        slots_until_clipping = 0
-        
-        # Look ahead to find when clipping will occur and how much
-        for i, future_slot in enumerate(self._future_slots if hasattr(self, '_future_slots') else []):
-            future_solar = future_slot.get('solar_kw', 0)
-            future_load = future_slot.get('load_kw', 0)
-            
-            # Surplus that would need to go somewhere
-            surplus = future_solar - future_load
-            
-            if surplus > export_limit:
-                # We can't export it all - will clip unless battery has space
-                potential_clip = surplus - export_limit
-                
-                # Check if battery will be full by then
-                # Estimate: current SOC + any solar charging between now and then
-                if current_soc > 85:  # If already high, likely to be full
-                    if slots_until_clipping == 0:  # First occurrence
-                        slots_until_clipping = i
-                    clipping_risk = True
-                    future_clipping_kwh += potential_clip * 0.5  # 30 min slot
-        
-        # Calculate if we need to discharge NOW to make space
-        should_discharge_for_clipping = False
-        
-        if clipping_risk and future_clipping_kwh > 0.1:  # More than 0.1kWh will clip
-            # Calculate available battery energy that could be discharged
-            available_kwh = (current_soc - 50) / 100 * battery_capacity  # Don't go below 50%
-            
-            # Calculate how long it takes to discharge what we need
-            # We need to clear at least future_clipping_kwh from battery
-            kwh_to_discharge = min(future_clipping_kwh, available_kwh)
-            
-            if kwh_to_discharge > 0:
-                # How many 30-min slots needed to discharge this?
-                # max_discharge_rate is in kW, so in 30 min we can discharge: rate * 0.5
-                kwh_per_slot = max_discharge_rate * 0.5
-                slots_needed = int(kwh_to_discharge / kwh_per_slot) + 1
-                
-                # Should we start discharging now?
-                # Start if: slots_until_clipping <= slots_needed
-                # This ensures we finish discharging just as clipping period starts
-                if slots_until_clipping <= slots_needed:
-                    should_discharge_for_clipping = True
-        
         # Calculate energy balance for this slot
         net_energy = solar_kwh - load_kwh
         
         # Decision logic
         
-        # 0. CLIPPING PREVENTION (HIGHEST PRIORITY): Discharge before high solar if battery full
-        # Better to use/export battery power now than waste solar later
-        if should_discharge_for_clipping and current_soc > 55:
-            mode = 'Force Discharge'
-            hours_until = slots_until_clipping * 0.5
-            action = f"Preventing {future_clipping_kwh:.1f}kWh solar clipping in {hours_until:.1f}h, clearing battery space"
-            # Discharge at max rate
-            discharge_kwh = min(
-                max_discharge_rate * 0.5,
-                (current_soc - 50) / 100 * battery_capacity  # Don't go below 50%
-            )
-            soc_change = -(discharge_kwh / battery_capacity) * 100
-            return mode, action, soc_change
+        # 0. STRATEGIC FEED-IN PRIORITY MODE (Morning strategy for high solar days)
+        # Check if this slot falls within the Feed-in Priority window
+        if feed_in_priority_strategy['use_strategy']:
+            slot_time = slot['time']
+            if (feed_in_priority_strategy['start_time'] <= slot_time <= 
+                feed_in_priority_strategy['end_time']):
+                mode = 'Feed-in Priority'
+                action = f"Grid-first solar routing ({feed_in_priority_strategy['reason'].split('→')[0]})"
+                # Let solar go to grid first, battery fills from overflow only
+                # Don't force any SOC change - let it happen naturally
+                soc_change = 0
+                return mode, action, soc_change
         
         # 1. ARBITRAGE OPPORTUNITY: If we can buy cheap and sell expensive later, do it!
         # With 90% round-trip efficiency:
@@ -313,7 +450,7 @@ class PlanCreator:
         arbitrage_margin = 1.0  # Minimum 1p profit after round-trip losses
         profitable_arbitrage = (export_price > import_price + arbitrage_margin)
         
-        if profitable_arbitrage and current_soc < 92 and not clipping_risk:  # Allow up to 92% for arbitrage
+        if profitable_arbitrage and current_soc < 92:  # Allow up to 92% for arbitrage
             mode = 'Force Charge'
             net_profit = export_price - import_price
             action = f"Arbitrage opportunity: buy {import_price:.2f}p, sell {export_price:.2f}p = {net_profit:.2f}p profit/kWh"

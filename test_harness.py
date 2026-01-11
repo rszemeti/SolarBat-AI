@@ -1042,6 +1042,18 @@ def generate_plan_html(plan):
         </div>
     """
     
+    # Count modes for summary
+    mode_counts = {
+        'Self Use': 0,
+        'Force Charge': 0,
+        'Force Discharge': 0,
+        'Feed-in Priority': 0
+    }
+    for step in plan['plan_steps']:
+        mode = step['mode']
+        if mode in mode_counts:
+            mode_counts[mode] += 1
+    
     # Build plan rows HTML
     plan_rows = ""
     for step in plan['plan_steps']:
@@ -1057,10 +1069,15 @@ def generate_plan_html(plan):
         cumulative = step.get('cumulative_cost', 0) / 100
         cumulative_str = f"£{cumulative:.2f}" if cumulative >= 0 else f"-£{abs(cumulative):.2f}"
         
+        # Add icon for Feed-in Priority mode
+        mode_display = step['mode']
+        if step['mode'] == 'Feed-in Priority':
+            mode_display = '⚡ Feed-in Priority'
+        
         plan_rows += f"""
             <tr class="{mode_class}">
                 <td><strong>{step['time'].strftime('%H:%M')}</strong></td>
-                <td>{step['mode']}</td>
+                <td><strong>{mode_display}</strong></td>
                 <td>{step['action']}</td>
                 <td>{step['soc_end']:.1f}%</td>
                 <td>{step.get('solar_kw', 0):.2f}</td>
@@ -1078,6 +1095,12 @@ def generate_plan_html(plan):
         Predicted prices: {plan['hours_predicted']:.1f} hours<br>
         Data confidence: {plan['confidence']}<br>
         Total estimated cost: £{plan.get('total_cost', 0):.2f}<br><br>
+        
+        <strong>Mode Breakdown:</strong><br>
+        Self Use: {mode_counts['Self Use']} slots<br>
+        Force Charge: {mode_counts['Force Charge']} slots<br>
+        Force Discharge: {mode_counts['Force Discharge']} slots<br>
+        ⚡ Feed-in Priority: {mode_counts['Feed-in Priority']} slots (clipping prevention)<br><br>
         <strong>Legend:</strong><br>
         <span style="background: #d4edda; padding: 3px 8px; border-radius: 3px;">Self Use</span> = Normal operation<br>
         <span style="background: #fff3cd; padding: 3px 8px; border-radius: 3px;">Force Charge</span> = Charging from grid (cheap period)<br>
