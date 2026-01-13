@@ -14,12 +14,18 @@ Limitations:
 - Can't learn from experience
 - Linear cost model only
 
+Inherits from BasePlanner to ensure consistent interface.
+
 Requires: pip install pulp
 """
 
 from datetime import datetime, timedelta
 from typing import Dict, List
 import sys
+from pathlib import Path
+
+# Import base planner
+from .base_planner import BasePlanner
 
 try:
     from pulp import *
@@ -28,7 +34,7 @@ except ImportError:
     sys.exit(1)
 
 
-class LinearProgrammingPlanner:
+class LinearProgrammingPlanner(BasePlanner):
     """
     Optimal battery planner using linear programming.
     
@@ -96,13 +102,11 @@ class LinearProgrammingPlanner:
         battery_charge = [LpVariable(f"charge_{t}", 0, max_charge_rate) for t in range(n_slots)]
         battery_discharge = [LpVariable(f"discharge_{t}", 0, max_discharge_rate) for t in range(n_slots)]
         
+        # Binary variable: 1 if charging, 0 if discharging (prevents simultaneous)
+        is_charging = [LpVariable(f"is_charging_{t}", cat='Binary') for t in range(n_slots)]
+        
         # Clipping (wasted solar) - we want to minimize this!
         clipped_solar = [LpVariable(f"clipped_{t}", 0, 20) for t in range(n_slots)]  # Max 20kW clipping
-        
-        # Binary variables for modes (force charge, force discharge, feed-in priority)
-        mode_charge = [LpVariable(f"mode_charge_{t}", cat='Binary') for t in range(n_slots)]
-        mode_discharge = [LpVariable(f"mode_discharge_{t}", cat='Binary') for t in range(n_slots)]
-        mode_feedin = [LpVariable(f"mode_feedin_{t}", cat='Binary') for t in range(n_slots)]
         
         # Objective: Minimize total cost (import - export) + PENALTY FOR CLIPPING
         # Clipping penalty: value clipped solar at import price (what we'd pay to get that energy)
@@ -135,48 +139,57 @@ class LinearProgrammingPlanner:
             
             prob += soc[t+1] == soc[t] + soc_change, f"SOC_Balance_{t}"
             
-            # Grid balance WITH CLIPPING:
-            # Solar generation = load + battery_charge + grid_export + clipped_solar - battery_discharge
-            # Rearranged: grid_import - grid_export = load + battery_charge - battery_discharge - solar + clipped_solar
-            prob += (grid_import[t] - grid_export[t] == 
-                    load_kw + battery_charge[t] - battery_discharge[t] - solar_kw + clipped_solar[t]), f"Grid_Balance_{t}"
+            # CORRECT Energy balance:
+            # Energy IN: solar + grid_import + battery_discharge
+            # Energy OUT: load + battery_charge + grid_export + clipping
+            # 
+            # solar + grid_import + battery_discharge = load + battery_charge + grid_export + clipped_solar
+            # Rearranged: grid_import + battery_discharge - battery_charge - grid_export = load + clipped_solar - solar
+            prob += (grid_import[t] + battery_discharge[t] - battery_charge[t] - grid_export[t] == 
+                    load_kw + clipped_solar[t] - solar_kw), f"Grid_Balance_{t}"
         
         # 3. Can't charge and discharge simultaneously
+        # Use binary variable: if is_charging=1, can charge but not discharge
+        #                      if is_charging=0, can discharge but not charge
+        M = 10  # Big number (max possible power)
         for t in range(n_slots):
-            # If charging, discharge must be 0 (and vice versa)
-            # Using big-M method with binary variable
-            M = 10  # Big number
-            prob += battery_charge[t] <= M * (1 - mode_discharge[t]), f"No_Simultaneous_1_{t}"
-            prob += battery_discharge[t] <= M * (1 - mode_charge[t]), f"No_Simultaneous_2_{t}"
+            # If is_charging=1: charge can be up to max_charge_rate, discharge must be 0
+            # If is_charging=0: discharge can be up to max_discharge_rate, charge must be 0
+            prob += battery_charge[t] <= M * is_charging[t], f"Charge_If_Charging_{t}"
+            prob += battery_discharge[t] <= M * (1 - is_charging[t]), f"Discharge_If_Not_Charging_{t}"
         
-        # 4. Feed-in priority mode constraints
-        # When in feed-in priority, solar goes to grid first (up to 5kW), overflow to battery
+        # 4. Feed-in priority mode constraints (simplified)
+        # Don't enforce hard mode constraints - let objective drive the solution
+        # The clipping penalty will naturally encourage export when needed
         for t in range(n_slots):
-            solar_kw = solar_forecast[t]['kw']
-            
-            # If feed-in priority and solar > 5kW, must export at least 5kW
-            # (This encourages grid-first when clipping would occur)
-            if solar_kw > 5.0:
-                prob += grid_export[t] >= 5.0 * mode_feedin[t], f"Feedin_Priority_{t}"
+            # Removed strict feed-in priority constraints
+            # Clipping penalty in objective is sufficient
+            pass
         
-        # 5. Strategic: Use feed-in priority when battery high + high solar coming
-        # Look ahead and enable feed-in priority if needed
-        for t in range(n_slots):
-            solar_kw = solar_forecast[t]['kw']
-            
-            # If SOC > 80% and solar > 8kW, strongly encourage feed-in priority
-            if solar_kw > 8.0:
-                # Soft constraint: prefer feed-in mode when high solar
-                prob += soc[t] + 15 * mode_feedin[t] <= 95, f"Clipping_Prevention_{t}"
+        # 5. Discourage simultaneous charge/discharge (soft constraint via objective)
+        # Already handled by making both expensive in the objective
         
         # Solve
         prob.solve(self.solver)
         
         # Check if optimal solution found
-        if LpStatus[prob.status] != 'Optimal':
-            self.log(f"WARNING: Solver status: {LpStatus[prob.status]}")
+        status = LpStatus[prob.status]
+        if status != 'Optimal':
+            self.log(f"ERROR: Solver status: {status}")
+            # Return error plan instead of falling back
+            error_plan = {
+                'timestamp': datetime.now(),
+                'slots': [],
+                'metadata': {
+                    'total_cost': 999999.0,  # Huge cost to indicate failure
+                    'solver_status': status,
+                    'error': f'LP solver failed with status: {status}',
+                    'confidence': 'failed'
+                }
+            }
+            return error_plan
         
-        # Extract solution
+        # Extract solution (all values should be valid now)
         plan_slots = []
         
         for t in range(n_slots):
@@ -189,10 +202,13 @@ class LinearProgrammingPlanner:
             discharge_kw = battery_discharge[t].varValue
             import_kw = grid_import[t].varValue
             export_kw = grid_export[t].varValue
-            clipped_kw = clipped_solar[t].varValue  # NEW: Track clipping
+            clipped_kw = clipped_solar[t].varValue
             
-            # Determine mode from solution
-            if mode_feedin[t].varValue > 0.5:
+            # Determine mode from solution (based on actual behavior, not binary vars)
+            solar_kw = solar_forecast[t]['kw']
+            
+            # High solar + high export = Feed-in Priority mode
+            if solar_kw > 5.0 and export_kw > 3.0:
                 mode = 'Feed-in Priority'
                 action = f"Grid-first solar routing (preventing clipping)"
             elif charge_kw > 0.1:
@@ -205,9 +221,12 @@ class LinearProgrammingPlanner:
                 mode = 'Self Use'
                 action = f"Self-use (solar + battery as needed)"
             
-            # Calculate cost for this slot
-            slot_cost = (import_prices[t]['price'] * import_kw * 0.5 / 100 -
-                        export_prices[t]['price'] * export_kw * 0.5 / 100)
+            # Calculate cost for this slot (matching LP objective exactly)
+            import_cost = import_prices[t]['price'] * import_kw * 0.5 / 100  # £
+            export_revenue = export_prices[t]['price'] * export_kw * 0.5 / 100  # £
+            clipping_cost = (clipping_penalty * clipped_kw * 0.5 / 100) if clipped_kw > 0 else 0  # £
+            
+            slot_cost = import_cost - export_revenue + clipping_cost
             
             cumulative_cost = sum(plan_slots[i]['cost'] for i in range(len(plan_slots))) + slot_cost if plan_slots else slot_cost
             
@@ -225,7 +244,8 @@ class LinearProgrammingPlanner:
                 'cumulative_cost': cumulative_cost * 100
             })
         
-        total_cost = plan_slots[-1]['cumulative_cost'] / 100 if plan_slots else 0.0
+        # Use LP objective value as the true cost (already accounts for everything)
+        total_cost = value(prob.objective)
         
         # Calculate total clipping
         total_clipping_kwh = sum(clipped_solar[t].varValue * 0.5 for t in range(n_slots))

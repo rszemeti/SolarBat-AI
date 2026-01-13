@@ -600,13 +600,22 @@ def main():
         print("\n💡 Would you like to run the planner and view the plan?")
         print("   This will generate a 24-hour optimization plan and")
         print("   display it in your browser.")
+        print("\nAvailable planners:")
+        print("  1. Rule-Based (heuristic, fast)")
+        print("  2. ML (machine learning, requires training)")
+        print("  3. LP (linear programming, mathematically optimal)")
         
-        response = input("\nRun planner? (y/n): ").strip().lower()
+        response = input("\nSelect planner (1-3) or n to skip: ").strip().lower()
         
-        if response == 'y':
-            plan = run_planner_and_generate_plan(hass)
+        planner_map = {'1': 'rule-based', '2': 'ml', '3': 'lp'}
+        
+        if response in planner_map:
+            planner_type = planner_map[response]
+            plan = run_planner_and_generate_plan(hass, planner_type)
             if plan:
                 start_web_server(plan)
+        elif response != 'n':
+            print("\n💡 Invalid selection. Skipping planner.")
         else:
             print("\n💡 The pricing provider and inverter interface")
             print("   will auto-discover entities when running in AppDaemon!")
@@ -620,18 +629,56 @@ def main():
 
 
 
-def run_planner_and_generate_plan(hass):
+def run_planner_and_generate_plan(hass, planner_type='rule-based'):
     """Run the actual planner and generate a 24-hour plan"""
     print("\n" + "=" * 60)
-    print("Running Solar Optimizer Planner")
+    print(f"Running Solar Optimizer Planner ({planner_type.upper()})")
     print("=" * 60)
     
     import sys
     import importlib.util
     
+    # Make sure we're in the right directory
+    if not os.path.exists('./apps/solar_optimizer'):
+        print("[ERROR] Please run from SolarBat-AI root directory")
+        return None
+    
     sys.path.insert(0, './apps/solar_optimizer')
+    sys.path.insert(0, './apps')
     
     try:
+        # Use the new planner structure
+        from apps.solar_optimizer.planners import RuleBasedPlanner, MLPlanner, LinearProgrammingPlanner
+        
+        # Select planner
+        if planner_type == 'rule-based':
+            planner = RuleBasedPlanner()
+        elif planner_type == 'ml':
+            try:
+                planner = MLPlanner()
+                if planner.feed_in_classifier is None:
+                    print("⚠️  ML planner not trained. Using heuristics.")
+            except Exception as e:
+                print(f"⚠️  Could not load ML planner: {e}")
+                print("   Falling back to rule-based")
+                planner = RuleBasedPlanner()
+                planner_type = 'rule-based'
+        elif planner_type == 'lp':
+            try:
+                planner = LinearProgrammingPlanner()
+            except Exception as e:
+                print(f"⚠️  Could not load LP planner: {e}")
+                print("   Install PuLP: pip install pulp")
+                print("   Falling back to rule-based")
+                planner = RuleBasedPlanner()
+                planner_type = 'rule-based'
+        else:
+            planner = RuleBasedPlanner()
+            planner_type = 'rule-based'
+        
+        print(f"✅ {planner_type.upper()} planner loaded")
+        
+        # Load providers (continue with existing code...)
         # Load pricing provider
         spec_pricing_base = importlib.util.spec_from_file_location(
             "pricing_provider_base",
@@ -797,13 +844,9 @@ def run_planner_and_generate_plan(hass):
         load_module = importlib.util.module_from_spec(spec_load)
         spec_load.loader.exec_module(load_module)
         
-        # Load plan creator (v2.3)
-        spec_plan = importlib.util.spec_from_file_location(
-            "plan_creator",
-            "./apps/solar_optimizer/plan_creator.py"
-        )
-        plan_module = importlib.util.module_from_spec(spec_plan)
-        spec_plan.loader.exec_module(plan_module)
+        # Load forecaster and other providers are already loaded above
+        # Just need to load/import plan_creator for compatibility
+        # (the planner variable is already set at the top of this function)
         
         # Create load forecaster
         load_forecaster = load_module.LoadForecaster(hass)
@@ -814,9 +857,6 @@ def run_planner_and_generate_plan(hass):
         # Get load forecast
         print("[PLAN] Predicting load for next 24 hours using AI...")
         load_forecast = load_forecaster.predict_loads_24h()
-        
-        # Create plan creator (v2.3 - pure optimization engine)
-        plan_creator = plan_module.PlanCreator()
         
         # Prepare provider data format for plan creator
         import_prices = [{'time': p['start'], 'price': p['price'], 'is_predicted': p.get('is_predicted', False)} 
@@ -831,9 +871,9 @@ def run_planner_and_generate_plan(hass):
             'active_slots': {'charge': [], 'discharge': []}
         }
         
-        # Generate optimal plan using v2.3 architecture
-        print("[PLAN] Running plan creator (v2.3)...")
-        plan = plan_creator.create_plan(
+        # Generate optimal plan using v2.3 architecture with selected planner
+        print(f"[PLAN] Running {planner_type} planner (v2.3)...")
+        plan = planner.create_plan(
             import_prices=import_prices,
             export_prices=export_prices,
             solar_forecast=solar_data,

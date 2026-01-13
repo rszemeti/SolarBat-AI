@@ -3,8 +3,12 @@
 .venv
 env/
 venv/
+results/
 
 # python bytecode everywhere
 __pycache__/
 *.py[cod]
 *$py.class
+
+
+

@@ -31,8 +31,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from apps.solar_optimizer.plan_creator import PlanCreator
-from apps.solar_optimizer.ml_planner import MLPlanner
+from apps.solar_optimizer.planners import RuleBasedPlanner, MLPlanner
 from generator import ScenarioGenerator
 from runner import ScenarioRunner
 
@@ -43,7 +42,7 @@ class MLTrainer:
     def __init__(self, scenarios_dir: str = "./scenarios"):
         self.scenarios_dir = scenarios_dir
         self.ml_planner = MLPlanner()
-        self.rule_based_planner = PlanCreator()
+        self.rule_based_planner = RuleBasedPlanner()
         self.runner = ScenarioRunner(scenarios_dir)
     
     def log(self, message: str):

@@ -17,8 +17,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from apps.solar_optimizer.ml_planner import MLPlanner
-from apps.solar_optimizer.plan_creator import PlanCreator
+from apps.solar_optimizer.planners import MLPlanner, RuleBasedPlanner
 from runner import ScenarioRunner
 
 
@@ -66,7 +65,7 @@ def test_single_scenario(ml_planner: MLPlanner, scenario: dict, verbose: bool = 
     return prediction
 
 
-def compare_planners(scenario: dict, ml_planner: MLPlanner, rule_based: PlanCreator):
+def compare_planners(scenario: dict, ml_planner: MLPlanner, rule_based: RuleBasedPlanner):
     """Compare ML vs rule-based planner on scenario"""
     
     print(f"\n{'='*70}")
@@ -221,7 +220,7 @@ def main():
     try:
         if args.compare:
             # Compare mode
-            rule_based = PlanCreator()
+            rule_based = RuleBasedPlanner()
             
             for scenario in scenarios:
                 compare_planners(scenario, ml_planner, rule_based)

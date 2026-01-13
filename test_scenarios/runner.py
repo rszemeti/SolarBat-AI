@@ -23,7 +23,7 @@ import time
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from apps.solar_optimizer.plan_creator import PlanCreator
+from apps.solar_optimizer.planners import RuleBasedPlanner
 
 
 class ScenarioRunner:
@@ -44,12 +44,12 @@ class ScenarioRunner:
         print(f"\n[RUNNER] Initializing {self.planner_type} planner...")
         
         if self.planner_type == "rule-based":
-            self.plan_creator = PlanCreator()
+            self.plan_creator = RuleBasedPlanner()
             print("[RUNNER] ✅ Rule-based planner loaded")
             
         elif self.planner_type == "ml":
             try:
-                from apps.solar_optimizer.ml_planner import MLPlanner
+                from apps.solar_optimizer.planners import MLPlanner
                 self.plan_creator = MLPlanner()
                 
                 if self.plan_creator.feed_in_classifier is None:
@@ -65,7 +65,7 @@ class ScenarioRunner:
                 
         elif self.planner_type == "lp":
             try:
-                from apps.solar_optimizer.lp_planner import LinearProgrammingPlanner
+                from apps.solar_optimizer.planners import LinearProgrammingPlanner
                 self.plan_creator = LinearProgrammingPlanner()
                 print("[RUNNER] ✅ LP planner loaded (PuLP solver)")
                 
@@ -478,8 +478,9 @@ class ScenarioRunner:
         print(f"Average Adjusted Cost: £{avg_adjusted_cost:.2f}/scenario")
         
         total_runtime = sum(r['runtime_seconds'] for r in results)
+        avg_runtime = total_runtime / len(results) if results else 0
         print(f"\nTotal Runtime: {total_runtime:.2f}s")
-        print(f"Average Runtime: {total_runtime/len(results):.3f}s/scenario")
+        print(f"Average Runtime: {avg_runtime:.3f}s/scenario")
         
         # Save results
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
