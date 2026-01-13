@@ -4,9 +4,12 @@ Test Scenario Runner
 Runs all test scenarios and validates results against expected outcomes.
 
 Usage:
-    python runner.py                    # Run all scenarios
-    python runner.py --category typical # Run only typical scenarios
-    python runner.py --compare v2.2 v2.3 # Compare two versions
+    python runner.py                           # Run all scenarios (rule-based)
+    python runner.py --planner ml              # Use ML planner
+    python runner.py --planner lp              # Use LP planner
+    python runner.py --planner rule-based      # Use rule-based (default)
+    python runner.py --category typical        # Run only typical scenarios
+    python runner.py --compare v2.2 v2.3       # Compare two versions
 """
 
 import json
@@ -26,12 +29,55 @@ from apps.solar_optimizer.plan_creator import PlanCreator
 class ScenarioRunner:
     """Runs test scenarios and validates results"""
     
-    def __init__(self, scenarios_dir: str = "./scenarios", results_dir: str = "./results"):
+    def __init__(self, scenarios_dir: str = "./scenarios", results_dir: str = "./results", 
+                 planner_type: str = "rule-based"):
         self.scenarios_dir = scenarios_dir
         self.results_dir = results_dir
+        self.planner_type = planner_type
         os.makedirs(results_dir, exist_ok=True)
         
-        self.plan_creator = PlanCreator()
+        # Initialize planner based on type
+        self._init_planner()
+    
+    def _init_planner(self):
+        """Initialize the specified planner"""
+        print(f"\n[RUNNER] Initializing {self.planner_type} planner...")
+        
+        if self.planner_type == "rule-based":
+            self.plan_creator = PlanCreator()
+            print("[RUNNER] ✅ Rule-based planner loaded")
+            
+        elif self.planner_type == "ml":
+            try:
+                from apps.solar_optimizer.ml_planner import MLPlanner
+                self.plan_creator = MLPlanner()
+                
+                if self.plan_creator.feed_in_classifier is None:
+                    print("[RUNNER] ⚠️  WARNING: ML planner not trained!")
+                    print("[RUNNER]    Using heuristics. Train first: python train_ml_planner.py")
+                else:
+                    print("[RUNNER] ✅ ML planner loaded (trained model found)")
+                    
+            except ImportError:
+                print("[RUNNER] ❌ ERROR: ML planner requires scikit-learn")
+                print("[RUNNER]    Install: pip install scikit-learn numpy")
+                sys.exit(1)
+                
+        elif self.planner_type == "lp":
+            try:
+                from apps.solar_optimizer.lp_planner import LinearProgrammingPlanner
+                self.plan_creator = LinearProgrammingPlanner()
+                print("[RUNNER] ✅ LP planner loaded (PuLP solver)")
+                
+            except ImportError:
+                print("[RUNNER] ❌ ERROR: LP planner requires PuLP")
+                print("[RUNNER]    Install: pip install pulp")
+                sys.exit(1)
+                
+        else:
+            print(f"[RUNNER] ❌ ERROR: Unknown planner type: {self.planner_type}")
+            print("[RUNNER]    Valid options: rule-based, ml, lp")
+            sys.exit(1)
     
     def load_scenarios(self, category: str = None) -> List[Dict]:
         """Load all scenarios from a category or all categories"""
@@ -418,6 +464,7 @@ class ScenarioRunner:
         print("\n" + "="*70)
         print("  TEST SUMMARY")
         print("="*70)
+        print(f"Planner: {self.planner_type.upper()}")
         print(f"Total Scenarios: {len(scenarios)}")
         print(f"Passed: {passed} ({passed/len(scenarios)*100:.1f}%)")
         print(f"Failed: {failed} ({failed/len(scenarios)*100:.1f}%)")
@@ -441,6 +488,7 @@ class ScenarioRunner:
         summary = {
             'timestamp': datetime.now().isoformat(),
             'version': 'v2.3',
+            'planner_type': self.planner_type,
             'category': category,
             'total_scenarios': len(scenarios),
             'passed': passed,
@@ -471,10 +519,13 @@ def main():
                        help='Directory for results')
     parser.add_argument('--category', choices=['typical', 'edge_cases', 'stress_tests'],
                        help='Run only specific category')
+    parser.add_argument('--planner', choices=['rule-based', 'ml', 'lp'],
+                       default='rule-based',
+                       help='Planner type: rule-based (default), ml (machine learning), lp (linear programming)')
     
     args = parser.parse_args()
     
-    runner = ScenarioRunner(args.scenarios_dir, args.results_dir)
+    runner = ScenarioRunner(args.scenarios_dir, args.results_dir, args.planner)
     
     try:
         runner.run_all(args.category)

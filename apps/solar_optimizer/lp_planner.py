@@ -96,15 +96,22 @@ class LinearProgrammingPlanner:
         battery_charge = [LpVariable(f"charge_{t}", 0, max_charge_rate) for t in range(n_slots)]
         battery_discharge = [LpVariable(f"discharge_{t}", 0, max_discharge_rate) for t in range(n_slots)]
         
+        # Clipping (wasted solar) - we want to minimize this!
+        clipped_solar = [LpVariable(f"clipped_{t}", 0, 20) for t in range(n_slots)]  # Max 20kW clipping
+        
         # Binary variables for modes (force charge, force discharge, feed-in priority)
         mode_charge = [LpVariable(f"mode_charge_{t}", cat='Binary') for t in range(n_slots)]
         mode_discharge = [LpVariable(f"mode_discharge_{t}", cat='Binary') for t in range(n_slots)]
         mode_feedin = [LpVariable(f"mode_feedin_{t}", cat='Binary') for t in range(n_slots)]
         
-        # Objective: Minimize total cost (import cost - export revenue)
+        # Objective: Minimize total cost (import - export) + PENALTY FOR CLIPPING
+        # Clipping penalty: value clipped solar at import price (what we'd pay to get that energy)
+        clipping_penalty = 50.0  # Pence per kWh clipped (makes it expensive to waste solar!)
+        
         total_cost = lpSum([
-            import_prices[t]['price'] * grid_import[t] * 0.5 / 100  # Convert to £
-            - export_prices[t]['price'] * grid_export[t] * 0.5 / 100
+            import_prices[t]['price'] * grid_import[t] * 0.5 / 100  # Import cost (£)
+            - export_prices[t]['price'] * grid_export[t] * 0.5 / 100  # Export revenue (£)
+            + clipping_penalty * clipped_solar[t] * 0.5 / 100  # Clipping penalty (£)
             for t in range(n_slots)
         ])
         
@@ -128,9 +135,11 @@ class LinearProgrammingPlanner:
             
             prob += soc[t+1] == soc[t] + soc_change, f"SOC_Balance_{t}"
             
-            # Grid balance: import - export = load + battery_charge - battery_discharge - solar
+            # Grid balance WITH CLIPPING:
+            # Solar generation = load + battery_charge + grid_export + clipped_solar - battery_discharge
+            # Rearranged: grid_import - grid_export = load + battery_charge - battery_discharge - solar + clipped_solar
             prob += (grid_import[t] - grid_export[t] == 
-                    load_kw + battery_charge[t] - battery_discharge[t] - solar_kw), f"Grid_Balance_{t}"
+                    load_kw + battery_charge[t] - battery_discharge[t] - solar_kw + clipped_solar[t]), f"Grid_Balance_{t}"
         
         # 3. Can't charge and discharge simultaneously
         for t in range(n_slots):
@@ -180,6 +189,7 @@ class LinearProgrammingPlanner:
             discharge_kw = battery_discharge[t].varValue
             import_kw = grid_import[t].varValue
             export_kw = grid_export[t].varValue
+            clipped_kw = clipped_solar[t].varValue  # NEW: Track clipping
             
             # Determine mode from solution
             if mode_feedin[t].varValue > 0.5:
@@ -217,6 +227,9 @@ class LinearProgrammingPlanner:
         
         total_cost = plan_slots[-1]['cumulative_cost'] / 100 if plan_slots else 0.0
         
+        # Calculate total clipping
+        total_clipping_kwh = sum(clipped_solar[t].varValue * 0.5 for t in range(n_slots))
+        
         # Count modes
         mode_counts = {}
         for slot in plan_slots:
@@ -227,6 +240,7 @@ class LinearProgrammingPlanner:
             'slots': plan_slots,
             'metadata': {
                 'total_cost': total_cost,
+                'total_clipping_kwh': round(total_clipping_kwh, 2),
                 'solver_status': LpStatus[prob.status],
                 'objective_value': value(prob.objective),
                 'confidence': 'optimal' if LpStatus[prob.status] == 'Optimal' else 'suboptimal',
@@ -245,6 +259,7 @@ class LinearProgrammingPlanner:
         self.log(f"LP solution: {mode_counts.get('Force Charge', 0)} charge, "
                 f"{mode_counts.get('Force Discharge', 0)} discharge, "
                 f"{mode_counts.get('Feed-in Priority', 0)} feed-in, "
+                f"clipping: {total_clipping_kwh:.2f}kWh, "
                 f"cost: £{total_cost:.2f}")
         
         return plan

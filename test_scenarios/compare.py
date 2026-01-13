@@ -51,12 +51,12 @@ class ResultsComparator:
         results1 = self.load_results(file1)
         results2 = self.load_results(file2)
         
-        print(f"\nRun 1: {results1.get('version', 'unknown')} - {results1['timestamp']}")
+        print(f"\nRun 1: {results1.get('version', 'unknown')} ({results1.get('planner_type', 'unknown')}) - {results1['timestamp']}")
         print(f"  File: {file1}")
         print(f"  Scenarios: {results1['total_scenarios']}")
         print(f"  Pass rate: {results1['passed']/results1['total_scenarios']*100:.1f}%")
         
-        print(f"\nRun 2: {results2.get('version', 'unknown')} - {results2['timestamp']}")
+        print(f"\nRun 2: {results2.get('version', 'unknown')} ({results2.get('planner_type', 'unknown')}) - {results2['timestamp']}")
         print(f"  File: {file2}")
         print(f"  Scenarios: {results2['total_scenarios']}")
         print(f"  Pass rate: {results2['passed']/results2['total_scenarios']*100:.1f}%")
