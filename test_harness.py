@@ -576,6 +576,15 @@ def main():
     print(f"  Testing at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
     
+    # Check we're in the right directory
+    if not os.path.exists('./apps/solar_optimizer'):
+        print("\n❌ ERROR: Please run from SolarBat-AI root directory")
+        print(f"   Current: {os.getcwd()}")
+        if 'test_scenarios' in os.getcwd():
+            print("   Fix: cd ..")
+        print("\n   Then run: python test_harness.py")
+        return
+    
     try:
         # Test 1: Connection
         hass = test_connection()
@@ -678,16 +687,9 @@ def run_planner_and_generate_plan(hass, planner_type='rule-based'):
         
         print(f"✅ {planner_type.upper()} planner loaded")
         
-        # Load providers (continue with existing code...)
-        # Load pricing provider
-        spec_pricing_base = importlib.util.spec_from_file_location(
-            "pricing_provider_base",
-            "./apps/solar_optimizer/pricing_provider_base.py"
-        )
-        pricing_base_module = importlib.util.module_from_spec(spec_pricing_base)
-        spec_pricing_base.loader.exec_module(pricing_base_module)
+        # Load providers - they now handle their own dependencies!
         
-        # Load base provider first (v2.3)
+        # Load base provider
         spec_base_prov = importlib.util.spec_from_file_location(
             "base_provider",
             "apps/solar_optimizer/providers/base_provider.py"
@@ -696,6 +698,7 @@ def run_planner_and_generate_plan(hass, planner_type='rule-based'):
         spec_base_prov.loader.exec_module(base_prov_module)
         sys.modules['base_provider'] = base_prov_module
         
+        # Load import pricing provider (loads its own dependencies via dependency_loader)
         spec_pricing = importlib.util.spec_from_file_location(
             "import_pricing_provider",
             "apps/solar_optimizer/providers/import_pricing_provider.py"
@@ -737,77 +740,38 @@ def run_planner_and_generate_plan(hass, planner_type='rule-based'):
         inv_caps = inverter.get_capabilities()
         
         # Get solar forecast from Solcast - REQUIRED
+        # Get solar forecast using SolarForecastProvider
         print("[PLAN] Getting solar forecast from Solcast...")
-        solar_forecast = []
         
         try:
-            # Get Solcast detailed forecast
-            solcast_entity = config.get('solcast_forecast_today', 'sensor.solcast_pv_forecast_forecast_today')
-            print(f"[PLAN] Reading from: {solcast_entity}")
+            # Load SolarForecastProvider
+            spec_solar = importlib.util.spec_from_file_location(
+                "solar_forecast_provider",
+                "apps/solar_optimizer/providers/solar_forecast_provider.py"
+            )
+            solar_module = importlib.util.module_from_spec(spec_solar)
+            spec_solar.loader.exec_module(solar_module)
             
-            solcast_data = hass.get_state(solcast_entity, attribute='all')
-            
-            if not solcast_data:
-                print(f"[ERROR] Could not read Solcast entity: {solcast_entity}")
-                print(f"[ERROR] Check entity exists in Developer Tools → States")
+            # Create solar forecast provider
+            solar_provider = solar_module.SolarForecastProvider(hass)
+            if not solar_provider.setup(config):
+                print("[ERROR] Solar forecast provider setup failed")
                 return None
             
-            if 'attributes' not in solcast_data:
-                print(f"[ERROR] Solcast entity has no attributes")
-                print(f"[ERROR] State: {solcast_data}")
+            # Get forecast data (returns list of {'time': datetime, 'kw': float})
+            solar_data = solar_provider.get_data(hours=24)
+            
+            if not solar_data:
+                print("[ERROR] No solar forecast data available")
                 return None
             
-            detailed = solcast_data['attributes'].get('detailedForecast', [])
+            # Convert to format needed by rest of code
+            solar_forecast = [{'period_end': s['time'], 'pv_estimate': s['kw']} for s in solar_data]
             
-            if not detailed:
-                print(f"[ERROR] Solcast has no detailedForecast data")
-                print(f"[ERROR] Available attributes: {list(solcast_data['attributes'].keys())}")
-                return None
-            
-            print(f"[PLAN] Found Solcast forecast with {len(detailed)} entries")
-            
-            now = datetime.now()
-            
-            for entry in detailed:
-                try:
-                    if not isinstance(entry, dict):
-                        continue
-                    
-                    # Solcast uses 'period_start', not 'period_end'
-                    period_start_str = entry.get('period_start')
-                    pv_estimate = entry.get('pv_estimate', 0)
-                    
-                    if not period_start_str:
-                        continue
-                    
-                    # Parse the timestamp and add 30 minutes to get period_end
-                    period_start = datetime.fromisoformat(str(period_start_str).replace('Z', '+00:00')).replace(tzinfo=None)
-                    period_end = period_start + timedelta(minutes=30)
-                    
-                    # Only use future forecasts
-                    if period_end >= now:
-                        solar_forecast.append({
-                            'period_end': period_end,
-                            'pv_estimate': float(pv_estimate)
-                        })
-                except Exception as e:
-                    print(f"[WARN] Skipping Solcast entry: {e}")
-                    continue
-            
-            if not solar_forecast:
-                print(f"[ERROR] No future solar forecast data available")
-                return None
-            
-            # Apply solar scaling factor (for testing)
-            solar_scaling = float(os.getenv('SOLAR_SCALING', '1.0'))
-            if solar_scaling != 1.0:
-                print(f"[PLAN] Applying solar scaling factor: {solar_scaling}x")
-                for sf in solar_forecast:
-                    sf['pv_estimate'] = sf['pv_estimate'] * solar_scaling
-            
-            print(f"[PLAN] Loaded {len(solar_forecast)} solar forecast points")
+            print(f"[PLAN] ✅ Loaded {len(solar_forecast)} solar forecast points")
             
             # Show first few for verification
+            solar_scaling = float(os.getenv('SOLAR_SCALING', '1.0'))
             print(f"[PLAN] Solar forecast sample (scaled {solar_scaling}x):")
             for i, sf in enumerate(solar_forecast[:6]):
                 print(f"       {sf['period_end'].strftime('%H:%M %d/%m')}: {sf['pv_estimate']:.2f}kW")
@@ -818,25 +782,35 @@ def run_planner_and_generate_plan(hass, planner_type='rule-based'):
             traceback.print_exc()
             return None
         
-        # Get export price
-        export_price = 15.0  # Default from .env
+        # Get export pricing using ExportPricingProvider
+        print("[PLAN] Getting export pricing...")
         try:
-            export_config = os.getenv('EXPORT_RATE', '15.0')
-            if '.' in export_config and 'sensor.' in export_config:
-                # It's a sensor
-                export_price = float(hass.get_state(export_config) or 15.0)
+            # Load ExportPricingProvider
+            spec_export = importlib.util.spec_from_file_location(
+                "export_pricing_provider",
+                "apps/solar_optimizer/providers/export_pricing_provider.py"
+            )
+            export_module = importlib.util.module_from_spec(spec_export)
+            spec_export.loader.exec_module(export_module)
+            
+            # Create export pricing provider
+            export_provider = export_module.ExportPricingProvider(hass)
+            if not export_provider.setup(config):
+                print("[WARN] Export pricing provider setup failed, using default 15p")
+                export_price = 15.0
             else:
-                # It's a hardcoded value
-                export_price = float(export_config)
-        except:
+                export_price = export_provider.get_export_price()
+            
+            print(f"[PLAN] Export price: {export_price}p/kWh")
+        except Exception as e:
+            print(f"[WARN] Could not load export pricing provider: {e}")
             export_price = 15.0
-        
-        print(f"[PLAN] Export price: {export_price}p/kWh")
+            print(f"[PLAN] Using default export price: {export_price}p/kWh")
         
         # Load the AI components
         print("[PLAN] Loading AI load forecaster and cost optimizer...")
         
-        # Load load forecaster
+        # Load load forecaster (loads its own dependencies via dependency_loader)
         spec_load = importlib.util.spec_from_file_location(
             "load_forecaster",
             "./apps/solar_optimizer/load_forecaster.py"

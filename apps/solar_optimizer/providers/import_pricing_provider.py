@@ -2,16 +2,53 @@
 Import Pricing Provider - Octopus Agile
 
 Provides future import electricity prices from Octopus Agile tariff.
-Handles the 4pm price gap with intelligent prediction.
+Handles the 4pm price gap with intelligent AI prediction using historical patterns.
 """
 
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+import sys
+import importlib.util
+from pathlib import Path
+
+# Auto-load dependencies for test harness compatibility
+def _ensure_dependencies():
+    """Load required dependencies if not already loaded"""
+    if 'time_series_predictor' in sys.modules and 'historical_cache' in sys.modules:
+        return  # Already loaded
+    
+    current_dir = Path(__file__).parent
+    
+    deps = [
+        ('base_provider', 'base_provider.py'),
+        ('time_series_predictor', 'time_series_predictor.py'),
+        ('historical_cache', 'historical_cache.py'),
+        ('historical_data_cache', 'historical_data_cache.py'),
+    ]
+    
+    for module_name, filename in deps:
+        if module_name not in sys.modules:
+            file_path = current_dir / filename
+            if file_path.exists():
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                except:
+                    pass  # Silently fail, let imports handle it
+
+_ensure_dependencies()
 
 try:
     from .base_provider import DataProvider
+    from .time_series_predictor import TimeSeriesPredictor
+    from .historical_cache import HistoricalDataCache, get_cache_directory
 except ImportError:
     from base_provider import DataProvider
+    from time_series_predictor import TimeSeriesPredictor
+    from historical_cache import HistoricalDataCache, get_cache_directory
 
 
 class ImportPricingProvider(DataProvider):
@@ -33,7 +70,9 @@ class ImportPricingProvider(DataProvider):
         self.current_rate_sensor = None
         self.rates_event = None
         self.export_rate_sensor = None
-        self.price_history = []  # For prediction
+        self.price_history = []  # For backward compatibility
+        self.predictor = TimeSeriesPredictor(name="agile_pricing")  # AI predictor
+        self.price_cache = None  # Persistent cache
     
     def setup(self, config: Dict) -> bool:
         """
@@ -78,7 +117,24 @@ class ImportPricingProvider(DataProvider):
                 self.log(f"Cannot find entity: {self.current_rate_sensor}", level="ERROR")
                 return False
             
-            # Load historical prices from entity
+            # Initialize persistent cache
+            cache_dir = get_cache_directory()
+            cache_name = "agile_import_prices"
+            self.price_cache = HistoricalDataCache(cache_dir, cache_name)
+            
+            # Try to load existing cache
+            if self.price_cache.load():
+                stats = self.price_cache.get_stats()
+                self.log(f"[CACHE] Loaded {stats['count']} historical price points (span: {stats['span_days']:.1f} days)")
+                
+                # Use cached data for prediction
+                cached_data = self.price_cache.get_data()
+                self.price_history = [{'timestamp': d['timestamp'], 'price': d['value'], 'hour': d['timestamp'].hour} for d in cached_data]
+                self._train_predictor()
+            else:
+                self.log("[CACHE] No existing price cache, will fetch historical data")
+            
+            # Load/update historical prices from entity
             self._load_historical_prices()
             
             self.log("Octopus Agile pricing provider setup successful")
@@ -248,10 +304,39 @@ class ImportPricingProvider(DataProvider):
                     continue
             
             if self.price_history:
-                self.log(f"Loaded {len(self.price_history)} historical prices for prediction")
+                self.log(f"Loaded {len(self.price_history)} historical prices")
+                
+                # Save to persistent cache
+                if self.price_cache:
+                    cache_data = [{'timestamp': p['timestamp'], 'value': p['price']} for p in self.price_history]
+                    self.price_cache.add_data(cache_data)
+                    self.price_cache.save()
+                    self.log(f"[CACHE] Saved prices to persistent cache")
+                
+                # Train the AI predictor with historical data
+                self._train_predictor()
                 
         except Exception as e:
             self.log(f"Could not load historical prices: {e}", level="WARNING")
+    
+    def record_price(self, timestamp: datetime, price: float):
+        """Record a historical price for training the predictor"""
+        self.price_history.append({
+            'timestamp': timestamp,
+            'price': price,
+            'hour': timestamp.hour
+        })
+    
+    def _train_predictor(self):
+        """Train the TimeSeriesPredictor with historical price data"""
+        # Convert price_history format to predictor format
+        training_data = [
+            {'timestamp': p['timestamp'], 'value': p['price']}
+            for p in self.price_history
+        ]
+        
+        self.predictor.add_historical_data(training_data)
+        self.log(f"[AI] Trained price predictor with {len(training_data)} historical prices")
     
     def get_data(self, hours: int = 24) -> List[Dict]:
         """
@@ -378,25 +463,30 @@ class ImportPricingProvider(DataProvider):
     
     def predict_price(self, target_time: datetime) -> float:
         """
-        Predict price for a given time using historical data.
+        Predict price for a given time using AI/historical patterns.
         
-        Simple implementation: uses median of historical prices at this time.
+        Uses TimeSeriesPredictor with yesterday-first strategy:
+        1. Yesterday's price at this time (primary)
+        2. Same day-of-week last week
+        3. Weighted 7-day rolling average
+        4. Hour-based statistical patterns
+        
+        Returns predicted price in pence/kWh.
         """
-        # Use historical median at this hour
-        if self.price_history:
-            hour_prices = [
-                p['price'] for p in self.price_history
-                if p['hour'] == target_time.hour
-            ]
-            if hour_prices:
-                # Return median
-                sorted_prices = sorted(hour_prices)
-                mid = len(sorted_prices) // 2
-                return sorted_prices[mid]
+        # Get current price as fallback
+        current_price = self.get_current_price()
+        fallback = current_price if current_price is not None else 20.0
         
-        # Fallback: use current price or default
-        current = self.get_current_price()
-        return current if current is not None else 20.0
+        # Use AI predictor
+        predicted_price, confidence = self.predictor.predict(target_time, fallback_value=fallback)
+        
+        # Log prediction details for transparency
+        if confidence in ['very_high', 'high']:
+            self.log(f"[PREDICT] {target_time.strftime('%H:%M')}: {predicted_price:.2f}p (confidence: {confidence})")
+        elif confidence == 'very_low':
+            self.log(f"[PREDICT] {target_time.strftime('%H:%M')}: {predicted_price:.2f}p (fallback - no history)", level="WARNING")
+        
+        return predicted_price
     
     def get_pricing_gaps(self, hours: int = 24) -> List[Tuple[datetime, datetime]]:
         """

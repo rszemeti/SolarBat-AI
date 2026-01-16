@@ -2,9 +2,11 @@
 Load Forecaster - AI-Powered Consumption Prediction
 
 Uses Home Assistant historical data to predict future electricity consumption.
+With intelligent incremental caching for fast performance.
+
 Learns from patterns in:
 - Time of day
-- Day of week
+- Day of week  
 - Recent trends
 - Seasonal variations
 """
@@ -12,6 +14,50 @@ Learns from patterns in:
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import statistics
+import sys
+import importlib.util
+from pathlib import Path
+
+# Auto-load dependencies for test harness compatibility
+def _ensure_dependencies():
+    """Load required dependencies if not already loaded"""
+    if 'historical_data_cache' in sys.modules:
+        return  # Already loaded
+    
+    # Try to find providers directory
+    current_file = Path(__file__)
+    providers_dir = current_file.parent / 'providers'
+    
+    if not providers_dir.exists():
+        return  # Running in AppDaemon, use normal imports
+    
+    deps = [
+        ('historical_cache', 'historical_cache.py'),
+        ('historical_data_cache', 'historical_data_cache.py'),
+    ]
+    
+    for module_name, filename in deps:
+        if module_name not in sys.modules:
+            file_path = providers_dir / filename
+            if file_path.exists():
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                except:
+                    pass
+
+_ensure_dependencies()
+
+try:
+    from .providers.historical_data_cache import CachedHistoricalDataFetcher
+except ImportError:
+    try:
+        from providers.historical_data_cache import CachedHistoricalDataFetcher
+    except ImportError:
+        from historical_data_cache import CachedHistoricalDataFetcher
 
 
 class LoadForecaster:
@@ -23,6 +69,8 @@ class LoadForecaster:
     2. Same time/day last week (accounts for weekday/weekend)
     3. Average for this hour over last 30 days
     4. Recent trend analysis
+    
+    With persistent caching for fast startup.
     """
     
     def __init__(self, hass):
@@ -34,8 +82,10 @@ class LoadForecaster:
         """
         self.hass = hass
         self.load_sensor = None
-        self.history_cache = {}
         self.log_func = print  # Default to print, can be overridden
+        
+        # Cached historical data fetcher
+        self.cached_fetcher = None
     
     def log(self, message: str, level: str = "INFO"):
         """Log a message"""
@@ -47,7 +97,7 @@ class LoadForecaster:
     
     def setup(self, config: Dict) -> bool:
         """
-        Setup load forecaster.
+        Setup load forecaster with intelligent caching.
         
         Args:
             config: Configuration dict with 'load_power' sensor
@@ -68,6 +118,17 @@ class LoadForecaster:
                 self.log(f"Cannot read load sensor: {self.load_sensor}", level="ERROR")
                 return False
             
+            # Initialize cached data fetcher
+            cache_name = f"load_{self.load_sensor.replace('.', '_')}"
+            self.cached_fetcher = CachedHistoricalDataFetcher(cache_name)
+            
+            # Show cache stats
+            stats = self.cached_fetcher.get_stats()
+            if stats['entries'] > 0:
+                self.log(f"[CACHE] Found existing cache: {stats['entries']} entries, "
+                        f"{stats['age_days']} days old, "
+                        f"last updated {stats['last_updated'].strftime('%Y-%m-%d %H:%M') if stats['last_updated'] else 'never'}")
+            
             self.log(f"Load forecaster setup successful (sensor: {self.load_sensor})")
             return True
             
@@ -77,7 +138,7 @@ class LoadForecaster:
     
     def get_historical_load(self, start_time: datetime, end_time: datetime) -> List[Dict]:
         """
-        Get historical load data from Home Assistant.
+        Get historical load data with intelligent caching.
         
         Args:
             start_time: Start of period
@@ -87,15 +148,40 @@ class LoadForecaster:
             List of {'time': datetime, 'load': float} dicts
         """
         try:
-            # Check cache first
-            cache_key = f"{start_time.isoformat()}_{end_time.isoformat()}"
-            if cache_key in self.history_cache:
-                return self.history_cache[cache_key]
+            if not self.cached_fetcher:
+                # Fallback to direct fetch if no cache
+                return self._fetch_history(start_time, end_time)
             
-            # Get history from HA
-            # Note: In test harness, we'll need to implement get_history
-            # In AppDaemon, use: self.hass.get_history()
+            # Define fetch function that converts format for cache
+            def fetch_func(start, end):
+                history = self._fetch_history(start, end)
+                # Convert from {'time': ..., 'load': ...} to {'timestamp': ..., 'value': ...}
+                return [{'timestamp': h['time'], 'value': h['load']} for h in history]
             
+            # Use cached fetcher (handles incremental updates automatically)
+            days_back = (end_time - start_time).days + 1
+            cached_data = self.cached_fetcher.fetch(fetch_func, days_back=max(days_back, 7))
+            
+            # Convert back from cache format to load format
+            # cached_data has {'timestamp': ..., 'value': ...}
+            # we need {'time': ..., 'load': ...}
+            all_data = [{'time': d['timestamp'], 'load': d['value']} for d in cached_data]
+            
+            # Filter to requested range
+            filtered_data = [
+                d for d in all_data
+                if start_time <= d['time'] <= end_time
+            ]
+            
+            return filtered_data
+            
+        except Exception as e:
+            self.log(f"Error getting historical load: {e}", level="WARNING")
+            return []
+    
+    def _fetch_history(self, start_time: datetime, end_time: datetime) -> List[Dict]:
+        """Actually fetch history from Home Assistant (no caching)"""
+        try:
             if hasattr(self.hass, 'get_history'):
                 # AppDaemon method
                 history = self.hass.get_history(
@@ -103,23 +189,13 @@ class LoadForecaster:
                     start_time=start_time,
                     end_time=end_time
                 )
+                return history
             else:
                 # Test harness - use REST API
-                history = self._get_history_via_api(start_time, end_time)
-            
-            # Cache result
-            self.history_cache[cache_key] = history
-            
-            # Limit cache size
-            if len(self.history_cache) > 100:
-                # Remove oldest entry
-                oldest_key = min(self.history_cache.keys())
-                del self.history_cache[oldest_key]
-            
-            return history
-            
+                return self._get_history_via_api(start_time, end_time)
+                
         except Exception as e:
-            self.log(f"Error getting historical load: {e}", level="WARNING")
+            self.log(f"Error fetching history: {e}", level="WARNING")
             return []
     
     def _get_history_via_api(self, start_time: datetime, end_time: datetime) -> List[Dict]:
@@ -242,7 +318,12 @@ class LoadForecaster:
     
     def _get_average_load_for_period(self, start: datetime, end: datetime) -> Optional[float]:
         """Get average load for a specific period (in kW)"""
-        history = self.get_historical_load(start, end)
+        # Use pre-fetched cached history if available (much faster!)
+        if hasattr(self, '_cached_history') and self._cached_history is not None:
+            history = [h for h in self._cached_history if start <= h['time'] <= end]
+        else:
+            # Fallback to fetching (slower)
+            history = self.get_historical_load(start, end)
         
         if not history:
             return None
@@ -325,15 +406,25 @@ class LoadForecaster:
         
         self.log(f"Predicting loads for next 24 hours starting {start.strftime('%H:%M')}")
         
-        for i in range(48):  # 24 hours = 48 half-hour slots
-            target_time = start + timedelta(minutes=30 * i)
-            load, confidence = self.predict_load(target_time)
-            
-            predictions.append({
-                'time': target_time,
-                'load_kw': load,
-                'confidence': confidence
-            })
+        # OPTIMIZATION: Fetch ALL historical data once (not per prediction!)
+        # This prevents 48 predictions × 60+ fetches = thousands of cache calls
+        history_start = now - timedelta(days=30)  # Get 30 days of history
+        self._cached_history = self.get_historical_load(history_start, now)
+        self.log(f"[CACHE] Loaded {len(self._cached_history)} historical points for predictions")
+        
+        try:
+            for i in range(48):  # 24 hours = 48 half-hour slots
+                target_time = start + timedelta(minutes=30 * i)
+                load, confidence = self.predict_load(target_time)
+                
+                predictions.append({
+                    'time': target_time,
+                    'load_kw': load,
+                    'confidence': confidence
+                })
+        finally:
+            # Clear cached history after predictions
+            self._cached_history = None
         
         # Show sample
         self.log(f"Load prediction sample (first 6 slots):")

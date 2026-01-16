@@ -147,6 +147,31 @@ class ExportPricingProvider(DataProvider):
         
         return prices
     
+    def get_export_price(self) -> float:
+        """
+        Get current export price in pence/kWh.
+        
+        Returns:
+            Export price in pence
+        """
+        try:
+            if self.is_dynamic and self.export_rate_sensor:
+                # Get from sensor
+                price = float(self.hass.get_state(self.export_rate_sensor) or self.fixed_rate or 15.0)
+                
+                # Convert pounds to pence if needed
+                if price < 1.0:
+                    price = price * 100
+                
+                return price
+            else:
+                # Return fixed rate
+                return self.fixed_rate if self.fixed_rate is not None else 15.0
+                
+        except Exception as e:
+            self.log(f"Error getting export price: {e}", level="WARNING")
+            return 15.0  # Safe fallback
+    
     def get_health(self) -> Dict:
         """Get health status"""
         return {

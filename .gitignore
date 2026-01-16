@@ -4,6 +4,7 @@
 env/
 venv/
 results/
+test_scenarios/
 
 # python bytecode everywhere
 __pycache__/
