@@ -30,8 +30,7 @@ from .base_planner import BasePlanner
 try:
     from pulp import *
 except ImportError:
-    print("ERROR: PuLP not installed. Run: pip install pulp")
-    sys.exit(1)
+    raise ImportError("PuLP not installed. Install with: pip install pulp")
 
 
 class LinearProgrammingPlanner(BasePlanner):
@@ -84,6 +83,9 @@ class LinearProgrammingPlanner(BasePlanner):
         # Number of time slots
         n_slots = len(import_prices)
         
+        # Handle case where initial SOC might exceed max_soc (e.g. 97% when max is 95%)
+        effective_max_soc = max(max_soc, battery_soc)  # Allow starting above max
+        
         self.log(f"Optimizing {n_slots} slots with LP solver...")
         self.log(f"Battery: {battery_capacity}kWh, SOC: {battery_soc}%, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
         
@@ -92,11 +94,13 @@ class LinearProgrammingPlanner(BasePlanner):
         
         # Decision variables for each slot
         # SOC at start of each slot (%)
-        soc = [LpVariable(f"soc_{t}", min_soc, max_soc) for t in range(n_slots + 1)]
+        # First slot can be above max_soc if battery is already charged beyond that
+        soc = [LpVariable(f"soc_0", min_soc, effective_max_soc)] + \
+              [LpVariable(f"soc_{t}", min_soc, max_soc) for t in range(1, n_slots + 1)]
         
         # Grid import/export (kW)
         grid_import = [LpVariable(f"import_{t}", 0, 10) for t in range(n_slots)]  # Max 10kW import
-        grid_export = [LpVariable(f"export_{t}", 0, 5) for t in range(n_slots)]   # Max 5kW export (DNO limit)
+        grid_export = [LpVariable(f"export_{t}", 0, 20) for t in range(n_slots)]  # Max 20kW export (will be constrained by mode)
         
         # Battery charge/discharge (kW)
         battery_charge = [LpVariable(f"charge_{t}", 0, max_charge_rate) for t in range(n_slots)]
@@ -105,21 +109,50 @@ class LinearProgrammingPlanner(BasePlanner):
         # Binary variable: 1 if charging, 0 if discharging (prevents simultaneous)
         is_charging = [LpVariable(f"is_charging_{t}", cat='Binary') for t in range(n_slots)]
         
+        # NEW: Binary variable for Grid-First mode
+        # 1 = Grid-First (Feed-in Priority): Solar goes to grid first, no 5kW export limit
+        # 0 = Self-Use: Solar goes to load/battery first, 5kW export limit applies
+        use_grid_first = [LpVariable(f"grid_first_{t}", cat='Binary') for t in range(n_slots)]
+        
         # Clipping (wasted solar) - we want to minimize this!
         clipped_solar = [LpVariable(f"clipped_{t}", 0, 20) for t in range(n_slots)]  # Max 20kW clipping
         
-        # Objective: Minimize total cost (import - export) + PENALTY FOR CLIPPING
-        # Clipping penalty: value clipped solar at import price (what we'd pay to get that energy)
-        clipping_penalty = 50.0  # Pence per kWh clipped (makes it expensive to waste solar!)
+        # Get export price for battery valuation
+        export_price_pkwh = export_prices[0]['price'] if export_prices else 15.0
+        
+        # Objective: Minimize actual out-of-pocket costs + encourage high final SOC
+        # - Import costs (what we pay to grid)
+        # - Export revenue (what grid pays us)
+        # - Clipping penalty (wasted solar)
+        # - Terminal SOC penalty (encourages ending with charged battery)
+        
+        clipping_penalty = 50.0  # Pence per kWh clipped
+        
+        # Terminal SOC target: Penalize ending below 80% SOC
+        # This encourages: maximize solar charging, minimize unnecessary discharge
+        # Value: If you end below 80%, you'll likely need to import later at avg price
+        avg_import_price = sum(p['price'] for p in import_prices) / len(import_prices)
+        target_soc = 80.0
+        
+        # Penalty increases linearly with SOC shortfall
+        # e.g., ending at 50% with 10kWh battery: (80-50)/100 * 10 * 20p / 100 = £0.60 penalty
+        soc_shortfall = (target_soc - soc[n_slots]) / 100 * battery_capacity * avg_import_price / 100
         
         total_cost = lpSum([
             import_prices[t]['price'] * grid_import[t] * 0.5 / 100  # Import cost (£)
             - export_prices[t]['price'] * grid_export[t] * 0.5 / 100  # Export revenue (£)
             + clipping_penalty * clipped_solar[t] * 0.5 / 100  # Clipping penalty (£)
             for t in range(n_slots)
-        ])
+        ]) + soc_shortfall  # Penalty for ending below target SOC
         
         prob += total_cost, "Total_Cost"
+        
+        # Constraints
+        
+        # 0. Terminal SOC target - don't end with empty battery!
+        # Require ending at least 40% SOC (keeps battery ready for next day)
+        min_final_soc = 40.0
+        prob += soc[n_slots] >= min_final_soc, "Minimum_Final_SOC"
         
         # Constraints
         
@@ -158,15 +191,27 @@ class LinearProgrammingPlanner(BasePlanner):
             prob += battery_charge[t] <= M * is_charging[t], f"Charge_If_Charging_{t}"
             prob += battery_discharge[t] <= M * (1 - is_charging[t]), f"Discharge_If_Not_Charging_{t}"
         
-        # 4. Feed-in priority mode constraints (simplified)
-        # Don't enforce hard mode constraints - let objective drive the solution
-        # The clipping penalty will naturally encourage export when needed
+        # 4. NEW: Export limit depends on mode (Self-Use vs Grid-First)
+        # If use_grid_first=0 (Self-Use): export limited to 5kW (DNO limit)
+        # If use_grid_first=1 (Grid-First): export limited to 20kW (no practical limit)
+        # Constraint: grid_export[t] <= 5 + 15 * use_grid_first[t]
         for t in range(n_slots):
-            # Removed strict feed-in priority constraints
-            # Clipping penalty in objective is sufficient
-            pass
+            prob += grid_export[t] <= 5.0 + 15.0 * use_grid_first[t], f"Export_Limit_{t}"
         
-        # 5. Discourage simultaneous charge/discharge (soft constraint via objective)
+        # 5. Only use Grid-First when there's actual solar to export
+        # Add soft constraint: Grid-First should only be 1 when solar > 3kW
+        # This prevents wasteful Grid-First mode during night/low-solar periods
+        for t in range(n_slots):
+            solar_kw = solar_forecast[t]['kw']
+            if solar_kw < 3.0:  # Low/no solar
+                # Strongly discourage Grid-First mode (but allow if really needed)
+                prob += use_grid_first[t] <= 0.1, f"Discourage_GridFirst_NoSolar_{t}"
+        
+        # 6. Clipping only happens when solar exceeds what can be used
+        # In Grid-First mode, clipping should be minimal since export limit is higher
+        # The objective function already penalizes clipping heavily
+        
+        # 7. Discourage simultaneous charge/discharge (soft constraint via objective)
         # Already handled by making both expensive in the objective
         
         # Solve
@@ -176,15 +221,39 @@ class LinearProgrammingPlanner(BasePlanner):
         status = LpStatus[prob.status]
         if status != 'Optimal':
             self.log(f"ERROR: Solver status: {status}")
-            # Return error plan instead of falling back
+            self.log(f"Falling back to simple Self-Use plan")
+            
+            # Return a simple self-use plan instead of empty
+            fallback_slots = []
+            current_soc = battery_soc
+            
+            for t in range(n_slots):
+                time = import_prices[t]['time']
+                
+                fallback_slots.append({
+                    'time': time,
+                    'mode': 'Self Use',
+                    'action': f"LP solver failed ({status}), using Self-Use fallback",
+                    'soc_end': current_soc,
+                    'solar_kw': solar_forecast[t]['kw'] if t < len(solar_forecast) else 0,
+                    'load_kw': load_forecast[t]['load_kw'] if t < len(load_forecast) else 1.0,
+                    'import_price': import_prices[t]['price'],
+                    'export_price': export_prices[t]['price'] if export_prices else 15.0,
+                    'soc_change': 0.0,
+                    'cumulative_cost': 0.0
+                })
+            
             error_plan = {
                 'timestamp': datetime.now(),
-                'slots': [],
+                'slots': fallback_slots,
                 'metadata': {
-                    'total_cost': 999999.0,  # Huge cost to indicate failure
+                    'total_cost': 0.0,
                     'solver_status': status,
-                    'error': f'LP solver failed with status: {status}',
-                    'confidence': 'failed'
+                    'error': f'LP solver failed with status: {status}, using Self-Use fallback',
+                    'confidence': 'low',
+                    'charge_slots': 0,
+                    'discharge_slots': 0,
+                    'planner_type': 'lp_fallback'
                 }
             }
             return error_plan
@@ -203,32 +272,54 @@ class LinearProgrammingPlanner(BasePlanner):
             import_kw = grid_import[t].varValue
             export_kw = grid_export[t].varValue
             clipped_kw = clipped_solar[t].varValue
+            is_grid_first = use_grid_first[t].varValue  # NEW: Read the mode decision
             
-            # Determine mode from solution (based on actual behavior, not binary vars)
+            # Determine mode from LP solution
             solar_kw = solar_forecast[t]['kw']
             
-            # High solar + high export = Feed-in Priority mode
-            if solar_kw > 5.0 and export_kw > 3.0:
+            # Check Grid-First mode (LP's decision)
+            if is_grid_first > 0.5:  # Binary variable is 1
                 mode = 'Feed-in Priority'
-                action = f"Grid-first solar routing (preventing clipping)"
+                action = f"Grid-first routing (export {export_kw:.2f}kW)"
             elif charge_kw > 0.1:
-                mode = 'Force Charge'
-                action = f"Charging at {charge_kw:.2f}kW (import {import_prices[t]['price']:.2f}p)"
+                # Charging battery
+                if import_kw > 0.1:
+                    mode = 'Force Charge'
+                    action = f"Charging at {charge_kw:.2f}kW from grid (import {import_prices[t]['price']:.2f}p)"
+                else:
+                    mode = 'Self Use'
+                    action = f"Charging at {charge_kw:.2f}kW from solar"
             elif discharge_kw > 0.1:
-                mode = 'Force Discharge'
-                action = f"Discharging at {discharge_kw:.2f}kW (export {export_prices[t]['price']:.2f}p)"
-            else:
+                # Discharging battery
+                if export_kw > 0.1:
+                    mode = 'Force Discharge'
+                    action = f"Discharging at {discharge_kw:.2f}kW (exporting {export_kw:.2f}kW at {export_prices[t]['price']:.2f}p)"
+                else:
+                    mode = 'Self Use'
+                    action = f"Discharging at {discharge_kw:.2f}kW to meet load"
+            elif import_kw > 0.1:
+                # Importing but not charging battery (direct to load)
                 mode = 'Self Use'
-                action = f"Self-use (solar + battery as needed)"
+                action = f"Importing {import_kw:.2f}kW to meet load"
+            elif export_kw > 0.1:
+                # Exporting surplus solar
+                mode = 'Self Use'
+                action = f"Exporting {export_kw:.2f}kW surplus solar"
+            else:
+                # Solar covering load exactly, or very low activity
+                mode = 'Self Use'
+                action = f"Self-sufficient (solar ≈ load)"
             
             # Calculate cost for this slot (matching LP objective exactly)
             import_cost = import_prices[t]['price'] * import_kw * 0.5 / 100  # £
             export_revenue = export_prices[t]['price'] * export_kw * 0.5 / 100  # £
             clipping_cost = (clipping_penalty * clipped_kw * 0.5 / 100) if clipped_kw > 0 else 0  # £
             
+            # Total slot cost (matching LP objective)
             slot_cost = import_cost - export_revenue + clipping_cost
             
-            cumulative_cost = sum(plan_slots[i]['cost'] for i in range(len(plan_slots))) + slot_cost if plan_slots else slot_cost
+            # Cumulative cost in pence (slot costs are already in £, so convert)
+            cumulative_cost_pence = sum(plan_slots[i]['cost'] for i in range(len(plan_slots))) + (slot_cost * 100) if plan_slots else (slot_cost * 100)
             
             plan_slots.append({
                 'time': time,
@@ -240,8 +331,12 @@ class LinearProgrammingPlanner(BasePlanner):
                 'load_kw': load_forecast[t]['load_kw'],
                 'import_price': import_prices[t]['price'],
                 'export_price': export_prices[t]['price'],
+                'import_kw': import_kw,  # NEW: Actual grid import
+                'export_kw': export_kw,  # NEW: Actual grid export
+                'charge_kw': charge_kw,  # NEW: Actual battery charge
+                'discharge_kw': discharge_kw,  # NEW: Actual battery discharge
                 'cost': slot_cost * 100,  # Convert to pence
-                'cumulative_cost': cumulative_cost * 100
+                'cumulative_cost': cumulative_cost_pence  # Already in pence
             })
         
         # Use LP objective value as the true cost (already accounts for everything)

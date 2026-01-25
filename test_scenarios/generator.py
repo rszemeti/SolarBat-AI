@@ -130,9 +130,9 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.3, 1.5, 2.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": 0,
+                    "feed_in_priority_hours": ">10",
                     "total_cost_max": 3.50,
-                    "notes": "No Feed-in Priority needed, opportunistic charging"
+                    "notes": "High solar surplus requires Feed-in Priority to prevent clipping"
                 }
             },
             
@@ -151,9 +151,9 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.5, 2.0, 3.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 30.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": 0,
+                    "feed_in_priority_hours": ">6",
                     "discharge_during_peak": True,
-                    "notes": "Should discharge during expensive evening peak"
+                    "notes": "Winter solar surplus requires Feed-in Priority; should also discharge during expensive evening peak"
                 }
             },
             

@@ -180,6 +180,18 @@ class RuleBasedPlanner(BasePlanner):
             self.log(f"📊 STRATEGIC DECISION: Feed-in Priority mode {feed_in_priority_strategy['start_time'].strftime('%H:%M')}-{feed_in_priority_strategy['end_time'].strftime('%H:%M')}")
             self.log(f"   Reason: {feed_in_priority_strategy['reason']}")
         
+        # ============================================
+        # STRATEGIC DECISION: Do we need pre-sunrise discharge?
+        # ============================================
+        presunrise_discharge_strategy = self._calculate_presunrise_discharge_strategy(
+            slots, current_soc, battery_capacity, max_discharge_rate, feed_in_priority_strategy
+        )
+        
+        if presunrise_discharge_strategy['use_strategy']:
+            self.log(f"🌅 PRE-SUNRISE DISCHARGE: {presunrise_discharge_strategy['start_time'].strftime('%H:%M')}-{presunrise_discharge_strategy['end_time'].strftime('%H:%M')}")
+            self.log(f"   Target: {presunrise_discharge_strategy['target_soc']:.0f}% SOC")
+            self.log(f"   Reason: {presunrise_discharge_strategy['reason']}")
+        
         for i, slot in enumerate(slots):
             # Store future slots for clipping analysis
             self._future_slots = slots[i:]
@@ -200,6 +212,7 @@ class RuleBasedPlanner(BasePlanner):
             mode, action, soc_change = self._decide_mode(
                 slot=slot,
                 feed_in_priority_strategy=feed_in_priority_strategy,
+                presunrise_discharge_strategy=presunrise_discharge_strategy,
                 current_soc=current_soc,
                 solar_kwh=solar_kwh,
                 load_kwh=load_kwh,
@@ -269,28 +282,30 @@ class RuleBasedPlanner(BasePlanner):
     def _should_use_feed_in_priority_strategy(self, slots: List[Dict], current_soc: float, 
                                                battery_capacity: float, export_limit: float = 5.0) -> Dict:
         """
-        Strategic decision: Should we start the day in Feed-in Priority mode?
+        Strategic decision: Should we use Feed-in Priority, and when to transition to Self-Use?
         
-        This is a MORNING STRATEGY decision, not a reactive last-minute fix.
+        NEW APPROACH: Work backwards from midnight to find optimal transition point.
+        This ensures battery doesn't run out in the evening while maximizing feed-in revenue.
         
         Logic:
-        1. Look at today's total solar forecast
-        2. Calculate available battery space
-        3. Estimate consumption
-        4. If solar surplus >> battery space → Use Feed-in Priority from morning
+        1. Start at midnight (tomorrow) with target SOC (e.g., 15%)
+        2. Work backwards, simulating Self-Use mode
+        3. Find the point where battery would overflow if we continued Self-Use earlier
+        4. That's our Feed-in Priority → Self-Use transition point
         
         Returns:
             Dict with:
                 - use_strategy: bool
-                - start_time: datetime (when to start)
-                - end_time: datetime (when to switch back to Self-Use)
+                - start_time: datetime (when to start Feed-in Priority)
+                - end_time: datetime (when to transition to Self-Use)
                 - reason: str (explanation)
         """
-        # Calculate total solar expected today (next 12 hours, 6am-6pm typically)
-        now = datetime.now()
+        # Use the first slot's time as "now" for scenario planning
+        # (handles both real-time and test scenarios with arbitrary dates)
+        now = slots[0]['time'] if slots else datetime.now()
         morning_start = now.replace(hour=6, minute=0, second=0, microsecond=0)
         if now.hour >= 6:
-            morning_start = now  # If already past 6am, start from now
+            morning_start = now
         
         evening_end = now.replace(hour=18, minute=0, second=0, microsecond=0)
         
@@ -303,56 +318,214 @@ class RuleBasedPlanner(BasePlanner):
             if morning_start <= slot_time <= evening_end:
                 solar_kw = slot.get('solar_kw', 0)
                 load_kw = slot.get('load_kw', 0)
-                
                 total_solar_kwh += solar_kw * 0.5
                 total_load_kwh += load_kw * 0.5
                 peak_solar_kw = max(peak_solar_kw, solar_kw)
         
-        # Calculate battery headroom
         battery_headroom_kwh = ((95 - current_soc) / 100) * battery_capacity
-        
-        # Calculate net surplus (after consumption)
         net_solar_surplus = total_solar_kwh - total_load_kwh
         
-        # Will we clip?
-        # If net surplus > battery headroom AND peak solar > export limit
-        # Then we should use Feed-in Priority strategy
+        # Quick bailout: If no clipping risk, no need for Feed-in Priority
+        # Trigger if either:
+        # 1. Net surplus exceeds battery space by 2kWh+ (will clip battery)
+        # 2. Peak solar exceeds export limit (will clip export)
+        will_overflow_battery = net_solar_surplus > battery_headroom_kwh + 2.0
+        will_clip_export = peak_solar_kw > export_limit
         
-        will_clip = (net_solar_surplus > battery_headroom_kwh + 2.0 and  # 2kWh margin
-                     peak_solar_kw > export_limit)
+        will_clip = will_overflow_battery or will_clip_export
         
-        if will_clip:
-            # Find when solar starts (first slot > 1kW)
-            strategy_start = None
-            for slot in slots:
-                if slot.get('solar_kw', 0) > 1.0:
-                    strategy_start = slot['time']
-                    break
-            
-            # Find when solar drops below 3kW (switch back to Self-Use)
-            strategy_end = evening_end
-            peak_passed = False
-            for i, slot in enumerate(slots):
-                solar_kw = slot.get('solar_kw', 0)
-                if solar_kw > 4.0:
-                    peak_passed = True
-                if peak_passed and solar_kw < 3.0:
-                    strategy_end = slot['time']
-                    break
-            
-            return {
-                'use_strategy': True,
-                'start_time': strategy_start or morning_start,
-                'end_time': strategy_end,
-                'reason': f"High solar day: {total_solar_kwh:.1f}kWh solar, {battery_headroom_kwh:.1f}kWh battery space, {net_solar_surplus:.1f}kWh surplus → Feed-in Priority from morning"
-            }
-        else:
+        if not will_clip:
             return {
                 'use_strategy': False,
                 'start_time': None,
                 'end_time': None,
                 'reason': f"No clipping risk: {total_solar_kwh:.1f}kWh solar fits in {battery_headroom_kwh:.1f}kWh space"
             }
+        
+        # BACKWARDS SIMULATION: Find optimal transition point
+        target_soc_midnight = 15.0  # Want battery at 15% by midnight
+        simulated_soc = target_soc_midnight
+        transition_slot_idx = None
+        
+        # Work backwards from end of day
+        for i in range(len(slots) - 1, -1, -1):
+            slot = slots[i]
+            slot_time = slot['time']
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            
+            # Only simulate daytime hours (before 10pm)
+            if slot_time.hour >= 22:
+                # Evening/night: always Self-Use, battery supplies load
+                net_kw = solar_kw - load_kw  # Usually negative at night
+                kwh_change = net_kw * 0.5
+                soc_change = (kwh_change / battery_capacity) * 100
+                simulated_soc -= soc_change  # Going backwards!
+                continue
+            
+            # Daytime: Check if Self-Use would cause overflow
+            net_kw = solar_kw - load_kw
+            
+            if net_kw > 0:  # Net generation
+                kwh_change = net_kw * 0.5
+                soc_change = (kwh_change / battery_capacity) * 100
+                potential_soc = simulated_soc + soc_change
+                
+                # Would battery overflow if we used Self-Use?
+                if potential_soc > 95.0:
+                    # Found it! This is where we need Feed-in Priority
+                    transition_slot_idx = i
+                    break
+                else:
+                    # Self-Use is safe, battery won't overflow
+                    simulated_soc = potential_soc
+            else:
+                # Net consumption - battery drains (going backwards = charging)
+                kwh_change = net_kw * 0.5
+                soc_change = (kwh_change / battery_capacity) * 100
+                simulated_soc -= soc_change
+        
+        if transition_slot_idx is not None:
+            # Found transition point - use Feed-in Priority before this, Self-Use after
+            transition_slot = slots[transition_slot_idx]
+            
+            # Find start of solar (first slot > 1kW)
+            strategy_start = None
+            for slot in slots:
+                if slot.get('solar_kw', 0) > 1.0:
+                    strategy_start = slot['time']
+                    break
+            
+            # Transition time
+            strategy_end = transition_slot['time']
+            
+            # Calculate what SOC we'd end up at midnight with this strategy
+            final_soc_estimate = simulated_soc
+            
+            return {
+                'use_strategy': True,
+                'start_time': strategy_start or morning_start,
+                'end_time': strategy_end,
+                'reason': f"High solar day: {total_solar_kwh:.1f}kWh solar, {battery_headroom_kwh:.1f}kWh space, {net_solar_surplus:.1f}kWh surplus → Feed-in Priority until {strategy_end.strftime('%H:%M')}, then Self-Use (ends ~{final_soc_estimate:.0f}% SOC)"
+            }
+        else:
+            # Entire day can be Self-Use without overflow
+            return {
+                'use_strategy': False,
+                'start_time': None,
+                'end_time': None,
+                'reason': f"Battery can handle all solar with Self-Use (simulated EOD SOC: {simulated_soc:.0f}%)"
+            }
+    
+    def _calculate_presunrise_discharge_strategy(self, slots: List[Dict], current_soc: float,
+                                                  battery_capacity: float, max_discharge_rate: float,
+                                                  feed_in_strategy: Dict) -> Dict:
+        """
+        Pre-sunrise discharge strategy: Create battery space BEFORE solar arrives.
+        
+        Used when even Feed-in Priority all day won't prevent clipping.
+        Works backwards from sunrise to calculate how much to discharge.
+        
+        Logic:
+        1. Calculate total solar surplus (after load and Feed-in Priority)
+        2. Calculate current battery space
+        3. If surplus > space, we need to discharge before sunrise
+        4. Work backwards from sunrise to find discharge window
+        
+        Returns:
+            Dict with:
+                - use_strategy: bool
+                - start_time: datetime (when to start discharging)
+                - end_time: datetime (when to stop - at sunrise)
+                - target_soc: float (what SOC to reach)
+                - discharge_rate: float (kW to discharge at)
+                - reason: str
+        """
+        now = slots[0]['time'] if slots else datetime.now()
+        
+        # Find sunrise (first slot with solar > 0.5kW)
+        sunrise_time = None
+        for slot in slots:
+            if slot.get('solar_kw', 0) > 0.5:
+                sunrise_time = slot['time']
+                break
+        
+        if not sunrise_time or sunrise_time <= now:
+            return {'use_strategy': False, 'reason': 'No sunrise time found or already past'}
+        
+        # Calculate total solar that will arrive during Feed-in Priority window
+        # (or all day if no Feed-in Priority)
+        total_solar_kwh = 0
+        total_load_kwh = 0
+        
+        if feed_in_strategy['use_strategy']:
+            # Only count solar during Feed-in Priority window
+            for slot in slots:
+                slot_time = slot['time']
+                if (feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']):
+                    total_solar_kwh += slot.get('solar_kw', 0) * 0.5
+                    total_load_kwh += slot.get('load_kw', 0) * 0.5
+        else:
+            # Count all daytime solar (6am-6pm)
+            morning = now.replace(hour=6, minute=0)
+            evening = now.replace(hour=18, minute=0)
+            for slot in slots:
+                slot_time = slot['time']
+                if morning <= slot_time <= evening:
+                    total_solar_kwh += slot.get('solar_kw', 0) * 0.5
+                    total_load_kwh += slot.get('load_kw', 0) * 0.5
+        
+        # Calculate net solar that needs battery space
+        net_solar_kwh = total_solar_kwh - total_load_kwh
+        
+        # Calculate current battery space (current to 95%)
+        current_space_kwh = ((95 - current_soc) / 100) * battery_capacity
+        
+        # Do we need to create more space?
+        space_shortfall = net_solar_kwh - current_space_kwh
+        
+        if space_shortfall <= 1.0:  # 1kWh margin
+            return {'use_strategy': False, 'reason': f'Sufficient space: {current_space_kwh:.1f}kWh available, {net_solar_kwh:.1f}kWh needed'}
+        
+        # Calculate target SOC
+        # We need to discharge enough to fit the solar
+        # But don't go below 15% (min_soc)
+        target_space_kwh = min(net_solar_kwh + 2.0, battery_capacity * 0.80)  # Up to 80% space (down to 15% SOC)
+        target_soc = max(15.0, 95 - (target_space_kwh / battery_capacity * 100))
+        
+        discharge_needed_kwh = ((current_soc - target_soc) / 100) * battery_capacity
+        
+        # Calculate discharge window
+        # Work backwards from sunrise
+        # Discharge at max rate to minimize time
+        discharge_hours = discharge_needed_kwh / max_discharge_rate
+        discharge_slots = int(discharge_hours * 2)  # 30-min slots
+        
+        # Find discharge start time (working backwards from sunrise)
+        sunrise_slot_idx = None
+        for i, slot in enumerate(slots):
+            if slot['time'] >= sunrise_time:
+                sunrise_slot_idx = i
+                break
+        
+        if sunrise_slot_idx is None or sunrise_slot_idx < discharge_slots:
+            return {'use_strategy': False, 'reason': 'Not enough time before sunrise'}
+        
+        discharge_start_idx = sunrise_slot_idx - discharge_slots
+        discharge_start_time = slots[discharge_start_idx]['time']
+        
+        # Make sure discharge starts after current time
+        if discharge_start_time <= now:
+            discharge_start_time = now
+        
+        return {
+            'use_strategy': True,
+            'start_time': discharge_start_time,
+            'end_time': sunrise_time,
+            'target_soc': target_soc,
+            'discharge_rate': max_discharge_rate,
+            'reason': f"Pre-sunrise discharge: {space_shortfall:.1f}kWh space needed, discharging from {current_soc:.0f}% to {target_soc:.0f}% ({discharge_needed_kwh:.1f}kWh) before sunrise at {sunrise_time.strftime('%H:%M')}"
+        }
     
     def _align_forecasts(self, prices, solar_forecast, load_forecast) -> List[Dict]:
         """Align all forecasts to common 30-min time slots"""
@@ -362,9 +535,12 @@ class RuleBasedPlanner(BasePlanner):
             slot_time = price['start']
             
             # Find matching solar
+            # Solar forecast 'period_end' is actually the slot time (despite the name)
+            # Match within 5 minutes to handle slight timing differences
             solar_kw = 0.0
             for sf in solar_forecast:
-                if abs((sf['period_end'] - slot_time).total_seconds()) < 1800:  # Within 30 min
+                time_diff = abs((sf['period_end'] - slot_time).total_seconds())
+                if time_diff < 300:  # Within 5 minutes
                     solar_kw = sf['pv_estimate']
                     break
             
@@ -372,7 +548,8 @@ class RuleBasedPlanner(BasePlanner):
             load_kw = 1.0  # Default 1kW if no forecast
             load_confidence = 'unknown'
             for lf in load_forecast:
-                if abs((lf['time'] - slot_time).total_seconds()) < 1800:
+                time_diff = abs((lf['time'] - slot_time).total_seconds())
+                if time_diff < 300:  # Within 5 minutes
                     load_kw = lf['load_kw']
                     load_confidence = lf.get('confidence', 'unknown')
                     break
@@ -418,7 +595,7 @@ class RuleBasedPlanner(BasePlanner):
         
         return surplus
     
-    def _decide_mode(self, slot, feed_in_priority_strategy, 
+    def _decide_mode(self, slot, feed_in_priority_strategy, presunrise_discharge_strategy,
                      current_soc, solar_kwh, load_kwh, import_price, export_price,
                      future_deficit, future_solar_surplus, future_min_price,
                      battery_capacity, max_charge_rate, max_discharge_rate,
@@ -429,6 +606,7 @@ class RuleBasedPlanner(BasePlanner):
         Args:
             slot: Current time slot dict
             feed_in_priority_strategy: Strategic decision dict from _should_use_feed_in_priority_strategy
+            presunrise_discharge_strategy: Pre-sunrise discharge strategy dict
             ... (other parameters)
         
         Returns:
@@ -446,7 +624,26 @@ class RuleBasedPlanner(BasePlanner):
         
         # Decision logic
         
-        # 0. STRATEGIC FEED-IN PRIORITY MODE (Morning strategy for high solar days)
+        # 0a. PRE-SUNRISE DISCHARGE (Create battery space before solar arrives)
+        # Check if this slot falls within the pre-sunrise discharge window
+        if presunrise_discharge_strategy['use_strategy']:
+            slot_time = slot['time']
+            if (presunrise_discharge_strategy['start_time'] <= slot_time < 
+                presunrise_discharge_strategy['end_time']):
+                mode = 'Force Discharge'
+                target_soc = presunrise_discharge_strategy['target_soc']
+                discharge_rate = presunrise_discharge_strategy['discharge_rate']
+                
+                # Calculate discharge amount (limit to what's needed to reach target)
+                soc_deficit = current_soc - target_soc
+                max_discharge_kwh = (soc_deficit / 100) * battery_capacity
+                discharge_kwh = min(discharge_rate * 0.5, max_discharge_kwh)
+                soc_change = -(discharge_kwh / battery_capacity) * 100
+                
+                action = f"Pre-sunrise discharge to {target_soc:.0f}% (creating space for {presunrise_discharge_strategy['reason'].split('kWh')[0]}kWh solar)"
+                return mode, action, soc_change
+        
+        # 0b. STRATEGIC FEED-IN PRIORITY MODE (Morning strategy for high solar days)
         # Check if this slot falls within the Feed-in Priority window
         if feed_in_priority_strategy['use_strategy']:
             slot_time = slot['time']
