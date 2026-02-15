@@ -88,8 +88,27 @@ class SmartSolarOptimizer(hass.Hass):
         self.wastage_sensor = "sensor.solar_wastage_risk"
         self.capabilities_sensor = "sensor.solar_optimizer_capabilities"
         
+        # Forecast accuracy tracking
+        try:
+            from forecast_accuracy_tracker import ForecastAccuracyTracker
+            cache_dir = self.args.get("cache_dir", "/config/appdaemon/apps/solar_optimizer")
+            self.accuracy_tracker = ForecastAccuracyTracker(cache_dir=cache_dir)
+            self.log(f"Forecast accuracy tracker loaded: {self.accuracy_tracker.get_stats()}")
+        except ImportError:
+            self.accuracy_tracker = None
+            self.log("Forecast accuracy tracker not available (forecast_accuracy_tracker.py missing)", level="WARNING")
+        
+        # Cached HTML for web endpoint (regenerated with each plan)
+        self._cached_plan_html = None
+        
         # Create sensors
         self.create_sensors()
+        
+        # Register web endpoints for plan visualization
+        # Accessible at http://<HA_IP>:5050/api/appdaemon/solar_plan
+        self.register_endpoint(self.serve_plan_page, "solar_plan")
+        self.register_endpoint(self.save_settings_endpoint, "solar_plan_settings")
+        self.log("[WEB] Dashboard registered at /api/appdaemon/solar_plan")
         
         # Read inverter capabilities on startup
         self.update_inverter_capabilities()
@@ -106,6 +125,7 @@ class SmartSolarOptimizer(hass.Hass):
         self.run_hourly(self.record_metrics, datetime.now().replace(minute=55))
         self.listen_state(self.check_replan, self.solcast_remaining)
         self.run_daily(self.analyze_history, "02:00:00")
+        self.run_daily(self.record_yesterday_actuals, "01:30:00")
         self.run_in(self.generate_new_plan, 10)
         
         self.log("Smart Solar Optimizer initialized successfully")
@@ -444,6 +464,309 @@ class SmartSolarOptimizer(hass.Hass):
             
         except Exception as e:
             self.log(f"Error analyzing history: {e}", level="WARNING")
+    
+    # ========== WEB ENDPOINT ==========
+    
+    async def serve_plan_page(self, request):
+        """
+        Serve the plan visualization page.
+        Registered as AppDaemon endpoint at /api/appdaemon/solar_plan
+        
+        Also supports ?tab=accuracy to deep-link to the accuracy tab.
+        """
+        try:
+            if self._cached_plan_html:
+                html = self._cached_plan_html
+            else:
+                html = self._generate_plan_html()
+                self._cached_plan_html = html
+            
+            # Check for tab query parameter to auto-switch
+            tab = request.query.get('tab', 'plan') if hasattr(request, 'query') else 'plan'
+            if tab == 'accuracy':
+                html = html.replace(
+                    "switchTab('plan')",
+                    "switchTab('accuracy')",
+                    1  # Only replace the first occurrence (the DOMContentLoaded call won't exist, but harmless)
+                )
+            
+            return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+            
+        except Exception as e:
+            self.log(f"[WEB] Error serving plan page: {e}", level="ERROR")
+            error_html = f"<html><body><h1>Error generating plan</h1><p>{e}</p></body></html>"
+            return error_html, 500, {'Content-Type': 'text/html'}
+    
+    async def save_settings_endpoint(self, request):
+        """
+        POST endpoint to save settings from the Settings tab.
+        Registered at /api/appdaemon/solar_plan_settings
+        """
+        try:
+            data = await request.json()
+            
+            # Update self.args (in-memory config)
+            for key, value in data.items():
+                self.args[key] = value
+            
+            # Apply key settings immediately
+            if 'enable_preemptive_discharge' in data:
+                self.enable_preemptive_discharge = bool(data['enable_preemptive_discharge'])
+            if 'has_export' in data:
+                self.has_export = bool(data['has_export'])
+            if 'min_wastage_threshold' in data:
+                self.min_wastage_threshold = float(data['min_wastage_threshold'])
+            if 'min_benefit_threshold' in data:
+                self.min_benefit_threshold = float(data['min_benefit_threshold'])
+            if 'preemptive_discharge_min_soc' in data:
+                self.preemptive_discharge_min_soc = float(data['preemptive_discharge_min_soc'])
+            if 'preemptive_discharge_max_price' in data:
+                self.preemptive_discharge_max_price = float(data['preemptive_discharge_max_price'])
+            if 'min_change_interval' in data:
+                self.min_change_interval = int(float(data['min_change_interval']))
+            
+            # Invalidate HTML cache
+            self._cached_plan_html = None
+            
+            self.log(f"[SETTINGS] Updated {len(data)} settings from web UI")
+            
+            return json.dumps({'status': 'ok', 'updated': len(data)}), 200, {'Content-Type': 'application/json'}
+            
+        except Exception as e:
+            self.log(f"[SETTINGS] Error saving: {e}", level="ERROR")
+            return json.dumps({'status': 'error', 'message': str(e)}), 500, {'Content-Type': 'application/json'}
+    
+    def _generate_plan_html(self):
+        """Generate full HTML page with all 4 tabs: Plan, Predictions, Accuracy, Settings."""
+        import os
+        
+        if not self.current_plan:
+            return "<html><body><h1>No plan generated yet</h1><p>Waiting for first plan cycle...</p></body></html>"
+        
+        plan = self.current_plan
+        
+        # Locate templates
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        template_dir = os.path.join(app_dir, '..', '..', 'templates')
+        if not os.path.exists(os.path.join(template_dir, 'plan.html')):
+            template_dir = '/config/appdaemon/templates'
+        if not os.path.exists(os.path.join(template_dir, 'plan.html')):
+            template_dir = os.path.join(app_dir, 'templates')
+        
+        try:
+            with open(os.path.join(template_dir, 'plan.html'), 'r', encoding='utf-8') as f:
+                html_template = f.read()
+            with open(os.path.join(template_dir, 'plan.css'), 'r', encoding='utf-8') as f:
+                css_content = f.read()
+            with open(os.path.join(template_dir, 'plan.js'), 'r', encoding='utf-8') as f:
+                js_content = f.read()
+        except FileNotFoundError as e:
+            return f"<html><body><h1>Template files not found</h1><p>{template_dir}</p><p>{e}</p></body></html>"
+        
+        try:
+            from forecast_accuracy_tracker import (
+                generate_accuracy_html_parts, build_prediction_data,
+                generate_settings_html_parts, build_settings_data
+            )
+        except ImportError:
+            generate_accuracy_html_parts = None
+            build_prediction_data = None
+            generate_settings_html_parts = None
+            build_settings_data = None
+        
+        # ── TAB 1: Plan ──
+        all_prices = [s.get('import_price', s.get('price', 0)) for s in plan]
+        avg_price = sum(all_prices) / len(all_prices) if all_prices else 0
+        
+        summary_stats = f"""
+            <div class="stat-box"><div class="stat-label">Plan Steps</div><div class="stat-value">{len(plan)}</div></div>
+            <div class="stat-box"><div class="stat-label">Min Price</div><div class="stat-value">{min(all_prices):.2f}p</div></div>
+            <div class="stat-box"><div class="stat-label">Max Price</div><div class="stat-value">{max(all_prices):.2f}p</div></div>
+            <div class="stat-box"><div class="stat-label">Avg Price</div><div class="stat-value">{avg_price:.2f}p</div></div>
+        """
+        
+        plan_rows = ""
+        for step in plan:
+            mode = step.get('mode', 'Self Use')
+            mode_class = f"mode-{mode.lower().replace(' ', '-')}"
+            t = step.get('time', '')
+            time_str = t.strftime('%H:%M') if hasattr(t, 'strftime') else str(t)
+            imp = step.get('import_price', step.get('price', 0))
+            exp = step.get('export_price', 0)
+            soc = step.get('soc_end', step.get('expected_soc', 0))
+            solar = step.get('solar_kw', step.get('expected_solar', 0))
+            action = step.get('action', step.get('reason', mode))
+            cost = step.get('cost', 0)
+            cumul = step.get('cumulative_cost', 0) / 100
+            cost_class = 'cost-positive' if cost >= 0 else 'cost-negative'
+            
+            plan_rows += f"""<tr class="{mode_class}">
+                <td><strong>{time_str}</strong></td><td><strong>{mode}</strong></td><td>{action}</td>
+                <td>{soc:.1f}%</td><td>{solar:.2f}</td><td>{imp:.2f}p</td><td>{exp:.2f}p</td>
+                <td class="{cost_class}">{abs(cost):.2f}p</td><td><strong>{'£' if cumul >= 0 else '-£'}{abs(cumul):.2f}</strong></td>
+            </tr>"""
+        
+        info_summary = "<strong>Plan generated from live Home Assistant data.</strong>"
+        
+        # ── TAB 2: Predictions ──
+        if build_prediction_data:
+            prediction_data = build_prediction_data(plan)
+        else:
+            prediction_data = {'timeLabels': [], 'solarValues': [], 'socValues': [],
+                              'loadValues': [], 'importPrices': [], 'exportPrices': []}
+        
+        has_load = any(v > 0 for v in prediction_data.get('loadValues', []))
+        prediction_info = "<strong>Prediction Sources:</strong> Solar from Solcast, "
+        prediction_info += "Load from historical consumption patterns, " if has_load else "Load data not yet available, "
+        prediction_info += "Prices from Octopus Agile API."
+        
+        # ── TAB 3: Accuracy ──
+        accuracy_data = {'dates': [], 'solar_predicted': [], 'solar_actual': [],
+                         'solar_mape': [], 'load_predicted': [], 'load_actual': [],
+                         'load_mape': [], 'price_predicted_avg': [], 'price_actual_avg': [],
+                         'price_mae': [], 'summary': {}}
+        
+        if self.accuracy_tracker and generate_accuracy_html_parts:
+            try:
+                accuracy_data = self.accuracy_tracker.get_accuracy_data(days=10)
+                accuracy_parts = generate_accuracy_html_parts(accuracy_data)
+            except Exception as e:
+                self.log(f"[WEB] Accuracy tab error: {e}", level="WARNING")
+                accuracy_parts = generate_accuracy_html_parts(accuracy_data)
+        elif generate_accuracy_html_parts:
+            accuracy_parts = generate_accuracy_html_parts(accuracy_data)
+        else:
+            accuracy_parts = {
+                'metrics': '<div class="no-data-message"><h3>Module not loaded</h3></div>',
+                'rows': '<tr><td colspan="8" style="text-align:center;padding:30px;">—</td></tr>',
+                'info': 'forecast_accuracy_tracker.py not found.'
+            }
+        
+        # ── TAB 4: Settings ──
+        if generate_settings_html_parts:
+            settings_parts = generate_settings_html_parts(self.args)
+            settings_data = build_settings_data(self.args)
+        else:
+            settings_parts = {
+                'thresholds': '<p>Settings module not available.</p>',
+                'modes': '', 'sensors': '',
+                'info': 'forecast_accuracy_tracker.py not found.'
+            }
+            settings_data = {}
+        
+        # ── Substitute all placeholders ──
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        html = html_template
+        html = html.replace('{{timestamp}}', now_str)
+        html = html.replace('{{summary_stats}}', summary_stats)
+        html = html.replace('{{plan_rows}}', plan_rows)
+        html = html.replace('{{info_summary}}', info_summary)
+        html = html.replace('{{chart_data}}', json.dumps({}))  # not used now (plan tab has no charts)
+        html = html.replace('{{prediction_data}}', json.dumps(prediction_data))
+        html = html.replace('{{prediction_info}}', prediction_info)
+        html = html.replace('{{accuracy_data}}', json.dumps(accuracy_data))
+        html = html.replace('{{accuracy_metrics}}', accuracy_parts['metrics'])
+        html = html.replace('{{accuracy_rows}}', accuracy_parts['rows'])
+        html = html.replace('{{accuracy_info}}', accuracy_parts['info'])
+        html = html.replace('{{settings_thresholds}}', settings_parts['thresholds'])
+        html = html.replace('{{settings_modes}}', settings_parts['modes'])
+        html = html.replace('{{settings_sensors}}', settings_parts['sensors'])
+        html = html.replace('{{settings_info}}', settings_parts['info'])
+        html = html.replace('{{settings_data}}', json.dumps(settings_data))
+        
+        # Inline CSS and JS
+        html = html.replace('<link rel="stylesheet" href="plan.css">', f'<style>{css_content}</style>')
+        html = html.replace('<script src="plan.js"></script>', f'<script>{js_content}</script>')
+        
+        return html
+    
+    # ========== FORECAST ACCURACY: RECORD ACTUALS ==========
+    
+    def record_yesterday_actuals(self, kwargs):
+        """
+        Runs daily at 01:30 to record yesterday's actual solar/load/price.
+        Compares against predictions stored earlier by record_plan_predictions().
+        """
+        if not self.accuracy_tracker:
+            return
+        
+        try:
+            yesterday = datetime.now() - timedelta(days=1)
+            yesterday_str = yesterday.strftime('%Y-%m-%d')
+            
+            # Sum actual solar from hourly_consumption records
+            total_solar = 0
+            total_load = 0
+            price_sum = 0
+            price_count = 0
+            
+            for key, entries in self.history.get('hourly_consumption', {}).items():
+                for entry in entries:
+                    if entry['timestamp'].startswith(yesterday_str):
+                        total_solar += entry.get('solar', 0)  # kW snapshots (hourly)
+                        total_load += entry.get('consumption', 0)
+                        if entry.get('price', 0) > 0:
+                            price_sum += entry['price']
+                            price_count += 1
+            
+            avg_price = price_sum / price_count if price_count > 0 else 0
+            
+            if total_solar > 0 or total_load > 0:
+                self.accuracy_tracker.record_actuals(
+                    yesterday_str,
+                    solar_total_kwh=total_solar,
+                    load_total_kwh=total_load,
+                    avg_import_price=avg_price
+                )
+                
+                # Invalidate cached HTML so next request shows updated data
+                self._cached_plan_html = None
+                
+                self.log(f"[ACCURACY] Recorded yesterday's actuals: "
+                         f"solar={total_solar:.1f}kWh, load={total_load:.1f}kWh, "
+                         f"price={avg_price:.1f}p")
+            else:
+                self.log("[ACCURACY] No consumption data found for yesterday", level="WARNING")
+            
+            # Prune old data
+            self.accuracy_tracker.prune_old_data(max_days=60)
+            
+        except Exception as e:
+            self.log(f"[ACCURACY] Error recording actuals: {e}", level="WARNING")
+    
+    def record_plan_predictions(self):
+        """
+        Called after plan generation to record today's predictions.
+        """
+        if not self.accuracy_tracker or not self.current_plan:
+            return
+        
+        try:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            plan = self.current_plan
+            
+            # Sum predicted solar and load from plan steps
+            total_solar = sum(
+                step.get('solar_kw', step.get('expected_solar', 0))
+                for step in plan
+            )
+            total_load = sum(
+                step.get('expected_consumption', step.get('load_kw', 0))
+                for step in plan
+            )
+            
+            prices = [step.get('import_price', step.get('price', 0)) for step in plan]
+            avg_price = sum(prices) / len(prices) if prices else 0
+            
+            self.accuracy_tracker.record_predictions(
+                today_str,
+                solar_total_kwh=total_solar,
+                load_total_kwh=total_load,
+                avg_import_price=avg_price
+            )
+            
+        except Exception as e:
+            self.log(f"[ACCURACY] Error recording predictions: {e}", level="WARNING")
     
     # ========== PRICE HANDLING (30-MINUTE SLOTS) ==========
     
@@ -822,6 +1145,12 @@ class SmartSolarOptimizer(hass.Hass):
         
         self.current_plan = plan
         self.publish_plan(plan)
+        
+        # Record predictions for accuracy tracking
+        self.record_plan_predictions()
+        
+        # Invalidate cached HTML so web endpoint reflects the new plan
+        self._cached_plan_html = None
         
         battery_kwh = self.battery_capacity * battery_soc / 100
         self.update_wastage_sensor(datetime.now().hour, battery_kwh)

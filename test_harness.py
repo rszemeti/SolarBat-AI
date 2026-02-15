@@ -1004,26 +1004,28 @@ def simulate_plan(prices, solar_forecast, inv_state, inv_caps, export_price=15.0
     return plan_steps
 
 
-def generate_plan_html(plan):
-    """Generate HTML visualization using templates"""
+def generate_plan_html(plan, accuracy_tracker=None):
+    """Generate HTML visualization using the 4-tab template."""
     if not plan:
         return "<html><body><h1>Error: No plan generated</h1></body></html>"
     
     import json
     
-    # Build chart data from plan steps
-    time_labels = []
-    import_price_values = []
-    export_price_values = []
-    soc_values = []
-    solar_values = []
-    
-    for step in plan['plan_steps']:
-        time_labels.append(step['time'].strftime('%H:%M'))
-        import_price_values.append(step['import_price'])
-        export_price_values.append(step['export_price'])
-        soc_values.append(step['soc_end'])
-        solar_values.append(step.get('solar_kw', 0))
+    # Try to import helpers
+    try:
+        from apps.solar_optimizer.forecast_accuracy_tracker import (
+            generate_accuracy_html_parts, build_prediction_data, generate_settings_html_parts
+        )
+    except ImportError:
+        try:
+            sys.path.insert(0, os.path.dirname(__file__))
+            from apps.solar_optimizer.forecast_accuracy_tracker import (
+                generate_accuracy_html_parts, build_prediction_data, generate_settings_html_parts
+            )
+        except ImportError:
+            generate_accuracy_html_parts = None
+            build_prediction_data = None
+            generate_settings_html_parts = None
     
     # Load templates
     try:
@@ -1036,120 +1038,127 @@ def generate_plan_html(plan):
     except FileNotFoundError:
         return "<html><body><h1>Error: Template files not found in ./templates/</h1></body></html>"
     
-    # Build summary stats HTML
+    # ── TAB 1: Plan (summary + table) ──
     summary_stats = f"""
-        <div class="stat-box">
-            <div class="stat-label">Current SOC</div>
-            <div class="stat-value">{plan['battery_soc']:.1f}%</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Battery Size</div>
-            <div class="stat-value">{plan['battery_capacity']:.1f} kWh</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Min Price</div>
-            <div class="stat-value">{plan['statistics']['min']:.2f}p</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Max Price</div>
-            <div class="stat-value">{plan['statistics']['max']:.2f}p</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Avg Price</div>
-            <div class="stat-value">{plan['statistics']['avg']:.2f}p</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Confidence</div>
-            <div class="stat-value">{plan['confidence'].upper()}</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">24h Cost</div>
-            <div class="stat-value">£{plan.get('total_cost', 0):.2f}</div>
-        </div>
+        <div class="stat-box"><div class="stat-label">Current SOC</div><div class="stat-value">{plan['battery_soc']:.1f}%</div></div>
+        <div class="stat-box"><div class="stat-label">Battery Size</div><div class="stat-value">{plan['battery_capacity']:.1f} kWh</div></div>
+        <div class="stat-box"><div class="stat-label">Min Price</div><div class="stat-value">{plan['statistics']['min']:.2f}p</div></div>
+        <div class="stat-box"><div class="stat-label">Max Price</div><div class="stat-value">{plan['statistics']['max']:.2f}p</div></div>
+        <div class="stat-box"><div class="stat-label">Avg Price</div><div class="stat-value">{plan['statistics']['avg']:.2f}p</div></div>
+        <div class="stat-box"><div class="stat-label">Confidence</div><div class="stat-value">{plan['confidence'].upper()}</div></div>
+        <div class="stat-box"><div class="stat-label">24h Cost</div><div class="stat-value">£{plan.get('total_cost', 0):.2f}</div></div>
     """
     
-    # Count modes for summary
-    mode_counts = {
-        'Self Use': 0,
-        'Force Charge': 0,
-        'Force Discharge': 0,
-        'Feed-in Priority': 0
-    }
+    mode_counts = {'Self Use': 0, 'Force Charge': 0, 'Force Discharge': 0, 'Feed-in Priority': 0}
     for step in plan['plan_steps']:
         mode = step['mode']
         if mode in mode_counts:
             mode_counts[mode] += 1
     
-    # Build plan rows HTML
     plan_rows = ""
     for step in plan['plan_steps']:
         mode_class = f"mode-{step['mode'].lower().replace(' ', '-')}"
         pred_marker = " *" if step.get('is_predicted_price', False) else ""
-        
-        # Format cost
         slot_cost = step.get('cost', 0)
-        cost_str = f"{slot_cost:.2f}p" if slot_cost >= 0 else f"{abs(slot_cost):.2f}p"
         cost_class = "cost-positive" if slot_cost >= 0 else "cost-negative"
-        
-        # Format cumulative
         cumulative = step.get('cumulative_cost', 0) / 100
         cumulative_str = f"£{cumulative:.2f}" if cumulative >= 0 else f"-£{abs(cumulative):.2f}"
+        mode_display = '⚡ Feed-in Priority' if step['mode'] == 'Feed-in Priority' else step['mode']
         
-        # Add icon for Feed-in Priority mode
-        mode_display = step['mode']
-        if step['mode'] == 'Feed-in Priority':
-            mode_display = '⚡ Feed-in Priority'
-        
-        plan_rows += f"""
-            <tr class="{mode_class}">
-                <td><strong>{step['time'].strftime('%H:%M')}</strong></td>
-                <td><strong>{mode_display}</strong></td>
-                <td>{step['action']}</td>
-                <td>{step['soc_end']:.1f}%</td>
-                <td>{step.get('solar_kw', 0):.2f}</td>
-                <td>{step['import_price']:.2f}p{pred_marker}</td>
-                <td>{step['export_price']:.2f}p</td>
-                <td class="{cost_class}">{cost_str}</td>
-                <td><strong>{cumulative_str}</strong></td>
-            </tr>
-        """
+        plan_rows += f"""<tr class="{mode_class}">
+            <td><strong>{step['time'].strftime('%H:%M')}</strong></td>
+            <td><strong>{mode_display}</strong></td>
+            <td>{step['action']}</td>
+            <td>{step['soc_end']:.1f}%</td>
+            <td>{step.get('solar_kw', 0):.2f}</td>
+            <td>{step['import_price']:.2f}p{pred_marker}</td>
+            <td>{step['export_price']:.2f}p</td>
+            <td class="{cost_class}">{abs(slot_cost):.2f}p</td>
+            <td><strong>{cumulative_str}</strong></td>
+        </tr>"""
     
-    # Build info summary
     info_summary = f"""
         <strong>Plan Summary:</strong><br>
-        Known prices: {plan['hours_known']:.1f} hours<br>
-        Predicted prices: {plan['hours_predicted']:.1f} hours<br>
-        Data confidence: {plan['confidence']}<br>
-        Total estimated cost: £{plan.get('total_cost', 0):.2f}<br><br>
-        
-        <strong>Mode Breakdown:</strong><br>
-        Self Use: {mode_counts['Self Use']} slots<br>
-        Force Charge: {mode_counts['Force Charge']} slots<br>
-        Force Discharge: {mode_counts['Force Discharge']} slots<br>
-        ⚡ Feed-in Priority: {mode_counts['Feed-in Priority']} slots (clipping prevention)<br><br>
-        <strong>Legend:</strong><br>
-        <span style="background: #d4edda; padding: 3px 8px; border-radius: 3px;">Self Use</span> = Normal operation<br>
-        <span style="background: #fff3cd; padding: 3px 8px; border-radius: 3px;">Force Charge</span> = Charging from grid (cheap period)<br>
-        <span style="background: #f8d7da; padding: 3px 8px; border-radius: 3px;">Force Discharge</span> = Selling to grid (expensive period)
+        Known prices: {plan['hours_known']:.1f}h &nbsp; Predicted: {plan['hours_predicted']:.1f}h &nbsp;
+        Confidence: {plan['confidence']} &nbsp; Cost: £{plan.get('total_cost', 0):.2f}<br>
+        <strong>Modes:</strong> Self Use: {mode_counts['Self Use']} &nbsp;
+        Charge: {mode_counts['Force Charge']} &nbsp;
+        Discharge: {mode_counts['Force Discharge']} &nbsp;
+        ⚡ Feed-in: {mode_counts['Feed-in Priority']}
     """
     
-    # Build chart data JSON
-    chart_data = {
-        'timeLabels': time_labels,
-        'socValues': soc_values,
-        'importPrices': import_price_values,
-        'exportPrices': export_price_values,
-        'solarValues': solar_values
-    }
+    # ── TAB 2: Predictions ──
+    if build_prediction_data:
+        prediction_data = build_prediction_data(plan['plan_steps'])
+    else:
+        prediction_data = {'timeLabels': [], 'solarValues': [], 'socValues': [],
+                          'loadValues': [], 'importPrices': [], 'exportPrices': []}
     
-    # Replace template placeholders
+    prediction_info = "<strong>Sources:</strong> Solar from Solcast, Load from historical patterns, Prices from Octopus Agile."
+    
+    # ── TAB 3: Accuracy ──
+    empty_accuracy = {'dates': [], 'solar_predicted': [], 'solar_actual': [],
+                      'solar_mape': [], 'load_predicted': [], 'load_actual': [],
+                      'load_mape': [], 'price_predicted_avg': [], 'price_actual_avg': [],
+                      'price_mae': [], 'summary': {}}
+    
+    if accuracy_tracker and generate_accuracy_html_parts:
+        try:
+            accuracy_data = accuracy_tracker.get_accuracy_data(days=10)
+        except:
+            accuracy_data = empty_accuracy
+        accuracy_parts = generate_accuracy_html_parts(accuracy_data)
+    elif generate_accuracy_html_parts:
+        accuracy_data = empty_accuracy
+        accuracy_parts = generate_accuracy_html_parts(accuracy_data)
+    else:
+        accuracy_data = empty_accuracy
+        accuracy_parts = {
+            'metrics': '<div class="no-data-message"><h3>Not available</h3></div>',
+            'rows': '<tr><td colspan="8" style="text-align:center;padding:30px;">—</td></tr>',
+            'info': 'Module not loaded.'
+        }
+    
+    # ── TAB 4: Settings (test harness shows read-only config) ──
+    if generate_settings_html_parts:
+        test_config = {
+            'min_wastage_threshold': 1.0,
+            'min_benefit_threshold': 0.50,
+            'preemptive_discharge_min_soc': 50,
+            'preemptive_discharge_max_price': 20,
+            'min_change_interval': 3600,
+            'enable_preemptive_discharge': True,
+            'has_export': False,
+            'mode_self_use': 'Self Use',
+            'mode_grid_first': 'Grid First',
+            'mode_force_charge': 'Force Charge',
+            'mode_force_discharge': '',
+        }
+        settings_parts = generate_settings_html_parts(test_config)
+        settings_data = test_config
+    else:
+        settings_parts = {'thresholds': '<p>Not available</p>', 'modes': '', 'sensors': '', 'info': ''}
+        settings_data = {}
+    
+    # ── Substitute all placeholders ──
     html = html_template.replace('{{timestamp}}', plan['timestamp'].strftime('%Y-%m-%d %H:%M:%S'))
     html = html.replace('{{summary_stats}}', summary_stats)
     html = html.replace('{{plan_rows}}', plan_rows)
     html = html.replace('{{info_summary}}', info_summary)
-    html = html.replace('{{chart_data}}', json.dumps(chart_data))
+    html = html.replace('{{chart_data}}', json.dumps({}))
+    html = html.replace('{{prediction_data}}', json.dumps(prediction_data))
+    html = html.replace('{{prediction_info}}', prediction_info)
+    html = html.replace('{{accuracy_data}}', json.dumps(accuracy_data))
+    html = html.replace('{{accuracy_metrics}}', accuracy_parts['metrics'])
+    html = html.replace('{{accuracy_rows}}', accuracy_parts['rows'])
+    html = html.replace('{{accuracy_info}}', accuracy_parts['info'])
+    html = html.replace('{{settings_thresholds}}', settings_parts['thresholds'])
+    html = html.replace('{{settings_modes}}', settings_parts['modes'])
+    html = html.replace('{{settings_sensors}}', settings_parts['sensors'])
+    html = html.replace('{{settings_info}}', settings_parts['info'])
+    html = html.replace('{{settings_data}}', json.dumps(settings_data))
     
-    # Inline CSS and JS (for single-file serving)
+    # Inline CSS and JS
     html = html.replace('<link rel="stylesheet" href="plan.css">', f'<style>{css_content}</style>')
     html = html.replace('<script src="plan.js"></script>', f'<script>{js_content}</script>')
     
