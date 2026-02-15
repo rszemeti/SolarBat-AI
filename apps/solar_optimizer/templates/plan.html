@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SolarBat-AI — {{timestamp}}</title>
+    <link rel="stylesheet" href="plan.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>🦇 SolarBat-AI</h1>
+        <p class="generated-time">Generated: {{timestamp}}</p>
+        
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('plan')">📋 Plan</button>
+            <button class="tab-btn" onclick="switchTab('predictions')">🔮 Predictions</button>
+            <button class="tab-btn" onclick="switchTab('accuracy')">📊 Accuracy</button>
+            <button class="tab-btn" onclick="switchTab('settings')">⚙️ Settings</button>
+        </div>
+        
+        <!-- ═══════════════ TAB 1: PLAN ═══════════════ -->
+        <div id="tab-plan" class="tab-content active">
+            
+            <div class="summary">
+                {{summary_stats}}
+            </div>
+            
+            <div style="background: #e8f4f8; padding: 12px; border-radius: 5px; margin-bottom: 15px; font-size: 14px;">
+                <strong>💡 Mode Strategy:</strong> Feed-in Priority is a <strong>strategic morning decision</strong> for high solar days.
+                When forecast shows solar will exceed battery capacity, the system switches to grid-first routing from dawn through peak solar,
+                preventing clipping without battery cycling.
+            </div>
+            
+            <div class="mode-legend">
+                <div class="mode-legend-item">
+                    <div class="mode-legend-box" style="background: #d4edda;"></div>
+                    <span class="mode-legend-text">Self Use (battery first)</span>
+                </div>
+                <div class="mode-legend-item">
+                    <div class="mode-legend-box" style="background: #fff3cd;"></div>
+                    <span class="mode-legend-text">Force Charge (cheap import)</span>
+                </div>
+                <div class="mode-legend-item">
+                    <div class="mode-legend-box" style="background: #f8d7da;"></div>
+                    <span class="mode-legend-text">Force Discharge (profitable export)</span>
+                </div>
+                <div class="mode-legend-item">
+                    <div class="mode-legend-box" style="background: #cfe2ff; border-left: 3px solid #0d6efd;"></div>
+                    <span class="mode-legend-text">⚡ Feed-in Priority (grid-first for high solar)</span>
+                </div>
+            </div>
+            
+            <table class="plan-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Mode</th>
+                        <th>Action</th>
+                        <th>SOC</th>
+                        <th>Solar (kW)</th>
+                        <th>Import (p/kWh)</th>
+                        <th>Export (p/kWh)</th>
+                        <th>Cost (p)</th>
+                        <th>Total (£)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{plan_rows}}
+                </tbody>
+            </table>
+            
+            <div class="info-box">
+                {{info_summary}}
+            </div>
+        </div>
+        
+        <!-- ═══════════════ TAB 2: PREDICTIONS ═══════════════ -->
+        <div id="tab-predictions" class="tab-content">
+            
+            <h2>24-Hour Forecast</h2>
+            <p class="tab-subtitle">What the optimizer expects for the next 24 hours based on current data.</p>
+            
+            <div class="chart-container">
+                <h3>☀️ Solar Generation Forecast</h3>
+                <div class="chart">
+                    <canvas id="predSolarChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>🔋 Battery SOC Forecast</h3>
+                <div class="chart">
+                    <canvas id="predSOCChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>🏠 Household Load Forecast</h3>
+                <div class="chart">
+                    <canvas id="predLoadChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>💷 Electricity Pricing</h3>
+                <div class="chart">
+                    <canvas id="predPriceChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="info-box">
+                {{prediction_info}}
+            </div>
+        </div>
+        
+        <!-- ═══════════════ TAB 3: FORECAST ACCURACY ═══════════════ -->
+        <div id="tab-accuracy" class="tab-content">
+            
+            <h2>Forecast Accuracy — Last 10 Days</h2>
+            <p class="tab-subtitle">Comparing predictions made at plan time vs actual observed values. Lower error = better.</p>
+            
+            <div class="accuracy-metrics">
+                {{accuracy_metrics}}
+            </div>
+            
+            <div class="chart-container">
+                <h3>☀️ Solar — Predicted vs Actual</h3>
+                <div class="chart" style="height: 320px;">
+                    <canvas id="accSolarChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>🏠 Load — Predicted vs Actual</h3>
+                <div class="chart" style="height: 320px;">
+                    <canvas id="accLoadChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>💷 Price — Predicted vs Actual</h3>
+                <div class="chart" style="height: 320px;">
+                    <canvas id="accPriceChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>📉 Error Trend (MAPE %)</h3>
+                <div class="chart" style="height: 280px;">
+                    <canvas id="accErrorChart"></canvas>
+                </div>
+            </div>
+            
+            <h3>Daily Breakdown</h3>
+            <table class="plan-table accuracy-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Solar Pred</th>
+                        <th>Solar Actual</th>
+                        <th>Solar Err</th>
+                        <th>Load Pred</th>
+                        <th>Load Actual</th>
+                        <th>Load Err</th>
+                        <th>Price MAE</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{accuracy_rows}}
+                </tbody>
+            </table>
+            
+            <div class="info-box">
+                {{accuracy_info}}
+            </div>
+        </div>
+        
+        <!-- ═══════════════ TAB 4: SETTINGS ═══════════════ -->
+        <div id="tab-settings" class="tab-content">
+            
+            <h2>Configuration</h2>
+            <p class="tab-subtitle">Current optimizer settings. Changes are saved to the AppDaemon config and take effect on next plan cycle.</p>
+            
+            <div class="settings-section">
+                <h3>🔋 Battery &amp; Inverter Thresholds</h3>
+                <div class="settings-grid">
+                    {{settings_thresholds}}
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <h3>⚡ Inverter Mode Names</h3>
+                <p class="settings-note">Must match your inverter's exact mode strings (case-sensitive).</p>
+                <div class="settings-grid">
+                    {{settings_modes}}
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <h3>📡 Sensor Entity Mappings</h3>
+                <p class="settings-note">Home Assistant entity IDs used by the optimizer.</p>
+                <div class="settings-grid">
+                    {{settings_sensors}}
+                </div>
+            </div>
+            
+            <div class="settings-actions">
+                <button class="btn btn-primary" onclick="saveSettings()">💾 Save Changes</button>
+                <button class="btn btn-secondary" onclick="resetSettings()">↩️ Reset to Saved</button>
+                <span id="settings-status" class="settings-status"></span>
+            </div>
+            
+            <div class="info-box" style="margin-top: 20px;">
+                {{settings_info}}
+            </div>
+        </div>
+    </div>
+    
+    <script src="plan.js"></script>
+    <script>
+        const chartData = {{chart_data}};
+        const predictionData = {{prediction_data}};
+        const accuracyData = {{accuracy_data}};
+        const settingsData = {{settings_data}};
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            if (predictionData && predictionData.timeLabels && predictionData.timeLabels.length > 0) {
+                initPredictionCharts(predictionData);
+            }
+            if (accuracyData && accuracyData.dates && accuracyData.dates.length > 0) {
+                initAccuracyCharts(accuracyData);
+            }
+        });
+    </script>
+</body>
+</html>

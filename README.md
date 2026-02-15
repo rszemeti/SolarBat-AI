@@ -1,561 +1,196 @@
-# SolarBat-AI v2.3
+# 🦇 SolarBat-AI
 
-Intelligent battery management for solar + storage systems with Octopus Agile pricing.
+Intelligent solar battery optimizer for Home Assistant. Automatically manages your battery charging and discharging to minimise electricity costs using Octopus Agile pricing, Solcast solar forecasts, and learned consumption patterns.
 
-**Built for the Home Assistant community to optimize solar battery systems and maximize savings with time-of-use electricity tariffs.**
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Version](https://img.shields.io/badge/version-2.3.0-green.svg)
-![HA](https://img.shields.io/badge/Home%20Assistant-AppDaemon-blue.svg)
+## What It Does
 
----
+SolarBat-AI generates an optimal 24-hour battery plan every 30 minutes, deciding when to:
 
-## 🌟 Features
+- **Charge** from the grid during cheap Agile periods (overnight lows)
+- **Discharge** to the grid during expensive peaks (earning money)
+- **Self Use** for normal solar + battery operation
+- **Feed-in Priority** to prevent solar clipping on high-generation days
 
-### Core Optimization
-- ✅ **24-Hour AI Planning** - ML-powered load forecasting with confidence scoring
-- ✅ **Smart Clipping Prevention** - Uses mode switch to prioritize grid export (no battery cycling!)
-- ✅ **Arbitrage Trading** - Buy cheap, sell expensive automatically
-- ✅ **Zero Solar Waste** - Intelligent mode switching prevents clipping losses
+It learns your household consumption patterns over time, tracks Solcast forecast accuracy, and adapts its decisions accordingly.
 
-### Architecture (v2.3)
-- ✅ **Provider-Based Design** - Clean separation: data sources → optimization → execution
-- ✅ **Fully Testable** - Each component isolated and independently testable
-- ✅ **Swappable Components** - Easy to add new tariffs, inverters, or forecasting methods
-- ✅ **Health Monitoring** - Every data source reports status and confidence
+## Web Dashboard
 
-### Intelligence
-- ✅ **AI Load Forecasting** - Multi-method prediction (yesterday, last week, trends, averages)
-- ✅ **Price Prediction** - Handles 4pm Agile price gap with historical learning
-- ✅ **Cost Tracking** - Per-slot and cumulative cost/revenue tracking
-- ✅ **Confidence Scoring** - Know when data is reliable vs uncertain
+Accessible at `http://<your-HA-IP>:5050/api/appdaemon/solar_plan` with four tabs:
 
-### Control
-- ✅ **Three-Way Control System:**
-  - **Timed Charge Slots** - Cheap import (Agile pricing)
-  - **Timed Discharge Slots** - Profitable export 
-  - **Mode Switch** - Solar routing (battery-first vs grid-first)
-- ✅ **Minimal Writes** - Only updates inverter when plan differs from actual
-- ✅ **Smart Execution** - Compares plan to reality before writing
+| Tab | What it shows |
+|-----|---------------|
+| **📋 Plan** | Current 24h optimisation plan with mode decisions and costs |
+| **🔮 Predictions** | Solar, battery SOC, load, and pricing forecasts for next 24hrs |
+| **📊 Accuracy** | 10-day prediction vs actual comparison with error metrics |
+| **⚙️ Settings** | All configurable thresholds, inverter modes, and sensor mappings |
 
----
+## Requirements
 
-## 📋 What's New in v2.3
+- **Home Assistant** with **AppDaemon 4.x** (install via Add-on Store)
+- **Solcast** integration for solar forecasting
+- **Octopus Energy** integration for Agile pricing
+- **Solax ModBus** or compatible inverter integration (Solis, Solax, etc.)
 
-### Major Architecture Refactor
-**Clean Provider/Consumer Pattern:**
-```
-Data Providers → Plan Creator → Plan Executor → Inverter
-```
+## Installation
 
-### New Components
-- **5 Independent Data Providers:**
-  - ImportPricingProvider (Octopus Agile with prediction)
-  - ExportPricingProvider (Fixed or dynamic export rates)
-  - SolarForecastProvider (Solcast integration)
-  - LoadForecastProvider (AI consumption prediction)
-  - SystemStateProvider (Current inverter/battery state)
+### Via HACS (Recommended)
 
-- **PlanCreator** - Pure optimization engine (no HA dependencies)
-- **PlanExecutor** - Smart inverter control (writes only when needed)
+1. Install [HACS](https://hacs.xyz/) if you haven't already
+2. In HACS, go to **Settings** → enable **AppDaemon apps discovery & tracking**
+3. Go to HACS → **⋮** menu → **Custom repositories**
+4. Add `https://github.com/YOUR_USERNAME/SolarBat-AI` with category **AppDaemon**
+5. Find SolarBat-AI in HACS and click **Download**
+6. Configure `apps.yaml` (see below)
+7. Restart AppDaemon
 
-### Breakthrough: Mode Switch Integration
-**Clipping Prevention Without Battery Cycling:**
-
-**OLD (v2.2):** Discharge battery to make room → wasteful cycling
-**NEW (v2.3):** Switch to "Feed-in Priority" mode → solar goes to grid first!
-
-When battery is full and high solar is coming:
-- Switches inverter mode to prioritize grid export
-- Solar flows: Grid (5kW) → Battery (overflow)
-- **Zero clipping, minimal battery wear!**
-
-### Benefits
-- ✅ **Testable** - Mock any provider, test optimization in isolation
-- ✅ **Maintainable** - Change one component without touching others
-- ✅ **Extensible** - Add new tariffs or inverters easily
-- ✅ **Observable** - Health status for every data source
-
----
-
-## 🔧 Requirements
-
-### Home Assistant Integrations
-
-1. **AppDaemon 4.x** - Install via Add-on store
-2. **Solax ModBus Integration** - For Solis/Solax inverter control
-   - Provides battery, inverter, and power sensors
-   - Required for timed charge/discharge slot control
-   - **NEW:** Energy Storage Control Mode Switch support
-3. **Octopus Energy Integration** (Official HACS integration)
-   - Provides Agile pricing data
-4. **Solcast Solar Integration** (HACS)
-   - Provides solar forecast
-
-### Supported Hardware
-
-**Inverters:** 
-- ✅ **Solis S6 Hybrid** (via solax_modbus) - Fully tested
-- ✅ **Solis S6 with Mode Switch** - NEW in v2.3!
-- ✅ Other Solis models with timed slot support (via solax_modbus)
-- ⚠️ Solax inverters (should work but untested)
-- 🔄 Other brands - Need custom interface implementation
-
-**Mode Switch Support:**
-The v2.3 architecture uses the inverter's **Energy Storage Control Mode Switch** for intelligent solar routing:
-- `Self-Use - No Timed Charge/Discharge` → Solar to battery first
-- `Feed-in priority` → Solar to grid first (clipping prevention!)
-
-**Tariffs:**
-- ✅ Octopus Agile (Import) - Required
-- ✅ Octopus Agile Export - Optional (or fixed export rate)
-
----
-
-## 📦 Installation
-
-### Method 1: Direct Clone (Recommended)
-
-1. SSH into your Home Assistant or use the Terminal add-on:
+### Manual Installation
 
 ```bash
 cd /config/appdaemon/apps
-git clone https://github.com/rszemeti/SolarBat-AI.git solar_optimizer
-cd solar_optimizer
+git clone https://github.com/YOUR_USERNAME/SolarBat-AI.git
 ```
 
-2. Copy the example configuration:
+### AppDaemon Config
 
-```bash
-cp apps/solar_optimizer/apps.yaml.example ../../solar_optimizer.yaml
+Make sure your `appdaemon.yaml` has the app directory set correctly:
+
+```yaml
+appdaemon:
+  app_dir: /homeassistant/appdaemon/apps
 ```
 
-3. Edit the configuration with your entity IDs:
+## Configuration
 
-```bash
-nano ../../solar_optimizer.yaml
-```
-
-4. Restart AppDaemon:
-   - Settings → Add-ons → AppDaemon → Restart
-
-### Method 2: Manual Download
-
-1. Download this repository as ZIP
-2. Extract to `/config/appdaemon/apps/solar_optimizer/`
-3. Copy `apps.yaml.example` to `/config/appdaemon/apps/solar_optimizer.yaml`
-4. Edit with your entity IDs
-5. Restart AppDaemon
-
----
-
-## ⚙️ Configuration
-
-### Quick Start Configuration
-
-Edit `/config/appdaemon/apps/solar_optimizer.yaml`:
+Create or edit `/config/appdaemon/apps/apps.yaml`:
 
 ```yaml
 solar_optimizer:
   module: solar_optimizer
   class: SmartSolarOptimizer
   
-  # REQUIRED: Update these with YOUR entity IDs
+  # ── REQUIRED: Your entity IDs ──
   battery_soc: sensor.solax_battery_soc
   battery_capacity: sensor.solax_battery_capacity
   inverter_mode: select.solax_charger_use_mode
   
-  # Inverter capability sensors (auto-detected)
+  # Inverter mode names (must match exactly, case-sensitive)
+  mode_self_use: "Self Use"
+  mode_grid_first: "Grid First"
+  mode_force_charge: "Force Charge"
+  mode_force_discharge: "Force Discharge"   # Leave empty if not supported
+  
+  # Inverter capability sensors
   max_charge_rate: sensor.solax_battery_charge_max_current
   max_discharge_rate: sensor.solax_battery_discharge_max_current
   battery_voltage: sensor.solax_battery_voltage
+  inverter_max_power: sensor.solax_inverter_power
+  grid_export_limit: sensor.solax_export_control_user_limit
   
-  # Solar forecasting
+  # Real-time power sensors
+  pv_power: sensor.solax_pv_power
+  battery_power: sensor.solax_battery_power
+  load_power: sensor.solax_house_load
+  grid_power: sensor.solax_measured_power
+  
+  # Solar forecasting (Solcast)
   solcast_remaining: sensor.solcast_pv_forecast_forecast_remaining_today
   solcast_tomorrow: sensor.solcast_pv_forecast_forecast_tomorrow
+  solcast_forecast_today: sensor.solcast_pv_forecast_forecast_today
   
-  # Agile pricing - REPLACE xxxxx with YOUR MPAN
+  # Octopus Agile pricing (replace xxxxx with your MPAN)
   agile_current: sensor.octopus_energy_electricity_xxxxx_current_rate
   agile_rates: event.octopus_energy_electricity_xxxxx_current_day_rates
-```
-
-See [Configuration Guide](docs/configuration.md) for complete options.
-
----
-
-## 📊 Dashboard
-
-Example Lovelace cards are provided in `/dashboards/`.
-
-### Quick Dashboard Setup
-
-Add these cards to your dashboard:
-
-**1. Next Action Card** - Shows what the optimizer will do next
-
-```yaml
-# See dashboards/cards/next_action.yaml
-```
-
-**2. Wastage Alert Card** - Warns when solar will be wasted
-
-```yaml
-# See dashboards/cards/wastage_alert.yaml
-```
-
-**3. 24-Hour Plan Chart** - Visual timeline of the optimization plan
-
-```yaml
-# Requires: custom:apexcharts-card
-# See dashboards/optimizer_dashboard.yaml for complete example
-```
-
----
-
-## 🏗️ Architecture (v2.3)
-
-### Clean Separation of Concerns
-
-```
-┌──────────────────────────────────────────┐
-│        DATA PROVIDERS (5)                │
-│  ────────────────────────────────────    │
-│  Import Pricing  (Octopus Agile + AI)    │
-│  Export Pricing  (Fixed or dynamic)      │
-│  Solar Forecast  (Solcast)               │
-│  Load Forecast   (AI multi-method)       │
-│  System State    (Inverter readings)     │
-└──────────────────────────────────────────┘
-              ↓
-┌──────────────────────────────────────────┐
-│         PLAN CREATOR                     │
-│  Pure optimization logic                 │
-│  No HA dependencies                      │
-│  Fully testable                          │
-└──────────────────────────────────────────┘
-              ↓
-         Plan Object
-         (48 x 30-min slots)
-              ↓
-┌──────────────────────────────────────────┐
-│        PLAN EXECUTOR                     │
-│  Compares plan vs actual                 │
-│  Writes only when different              │
-│  Minimal inverter updates                │
-└──────────────────────────────────────────┘
-```
-
-### Benefits
-- **Testable:** Mock any provider to test optimization in isolation
-- **Maintainable:** Change pricing logic without touching inverter control
-- **Extensible:** Add new tariffs by creating a new provider
-- **Observable:** Health status for each data source
-
----
-
-## 🎯 How It Works
-
-### Three-Way Control System
-
-v2.3 uses a sophisticated three-way control strategy:
-
-#### 1. Timed Charge Slots
-```
-When: Cheap import prices (arbitrage opportunities)
-Control: number.solis_inverter_timed_charge_*
-Effect: Grid charges battery to target SOC
-Example: 02:00-02:30 charge to 90% at 13.27p/kWh
-```
-
-#### 2. Timed Discharge Slots
-```
-When: High export prices OR profitable arbitrage
-Control: number.solis_inverter_timed_discharge_*
-Effect: Battery discharges to grid at max rate
-Example: 16:00-16:30 discharge to 20% at 25p/kWh
-```
-
-#### 3. Mode Switch (NEW in v2.3!)
-```
-Entity: select.solis_inverter_energy_storage_control_switch
-
-Self-Use Mode:
-  Solar → Battery first → Overflow to grid
-  Use: Normal operation, battery has capacity
   
-Feed-in Priority Mode:
-  Solar → Grid first → Overflow to battery
-  Use: Clipping prevention when battery full!
+  # ── OPTIONAL ──
+  has_export: false
+  # export_rate_sensor: sensor.octopus_energy_electricity_export_current_rate
+  
+  enable_preemptive_discharge: true
+  min_wastage_threshold: 1.0          # kWh - min solar waste to trigger discharge
+  min_benefit_threshold: 0.50         # £ - min benefit to justify discharge
+  preemptive_discharge_min_soc: 50    # % - don't discharge below this
+  preemptive_discharge_max_price: 20  # p/kWh - don't discharge if grid is expensive
+  min_change_interval: 3600           # seconds between mode changes
 ```
 
-### Decision Priority
+**Finding your entity IDs:** Go to Developer Tools → States and search for "solax", "solis", "octopus", or "solcast".
 
-The optimizer makes decisions in this priority order:
+## How It Works
 
-1. **Clipping Prevention (Mode Switch)** - Battery full + high solar coming? Switch to Feed-in Priority to route solar to grid first
-2. **Arbitrage Trading** - Buy cheap (13p), sell expensive (25p) = profit!
-3. **Deficit Prevention** - Charge if battery low and expensive prices ahead
-4. **Wastage Prevention** - Don't charge before big solar day
-5. **Self Use (Default)** - Normal operation, battery-first solar routing
+The optimizer runs on a 30-minute cycle aligned to Agile pricing slots:
 
-### Clipping Prevention: The Breakthrough
+1. **Data Collection** — Fetches current battery state, solar forecast, Agile prices, and learned load patterns
+2. **Plan Generation** — Creates an optimal 24h schedule considering price arbitrage, solar clipping prevention, and battery health
+3. **Execution** — Sets the inverter mode for the current slot
+4. **Learning** — Records actual consumption, solar generation, and price data to improve future predictions
 
-**The Problem:**
+### Inverter Modes
+
+| Mode | When | Why |
+|------|------|-----|
+| Self Use | Default | Normal solar + battery operation |
+| Force Charge | Cheap overnight periods | Fill battery at ~5p/kWh |
+| Force Discharge | Peak price periods | Export at ~35-45p/kWh |
+| Feed-in Priority | High solar mornings | Route solar to grid first, preventing clipping |
+
+### Clipping Prevention
+
+On high-solar days, the optimizer detects when generation will exceed battery + consumption capacity. It switches to Feed-in Priority mode early, routing solar to the grid before the battery fills up — preventing energy waste.
+
+## HA Dashboard Cards
+
+Example Lovelace cards are in `dashboards/`. Add them to your dashboard for at-a-glance status.
+
+## Monitoring
+
+The optimizer creates these HA sensors:
+
+- `sensor.solar_optimizer_plan` — Current plan with next action
+- `sensor.solar_wastage_risk` — Predicted solar clipping risk
+- `sensor.solar_optimizer_capabilities` — Detected inverter capabilities
+
+Check AppDaemon logs for detailed plan output: Settings → Add-ons → AppDaemon → Log.
+
+## Troubleshooting
+
+**No plan generated?** Check that all required sensors exist and return valid values in Developer Tools → States.
+
+**Mode changes too frequent?** Increase `min_change_interval` (default 3600 seconds).
+
+**Inverter not responding?** Verify your mode names match exactly — go to Developer Tools → States, find your inverter mode entity, and check the available options list.
+
+**Pre-emptive discharge not triggering?** Ensure `enable_preemptive_discharge: true` and that solar forecast exceeds battery capacity + expected consumption.
+
+## Project Structure
+
 ```
-Battery: 95% full (0.5kWh space remaining)
-Solar:   9kW arriving in 2 hours
-Export:  5kW DNO limit
-Result:  4kW clipped! ❌
-```
-
-**OLD Solution (v2.2):**
-```
-1. Force Discharge: 95% → 50%
-2. Solar arrives: charges 50% → 95%
-Result: ✓ No clipping, but battery cycled unnecessarily
-```
-
-**NEW Solution (v2.3 - Mode Switch):**
-```
-1. Switch to "Feed-in Priority" mode
-2. Solar arrives (9kW):
-   - 5kW → Grid (DNO limit)
-   - 4kW → Battery (fills 95% → 99%)
-3. Switch back to "Self-Use" when full
-Result: ✓ No clipping, minimal battery wear! 🎉
-```
-
-### Inverter Modes (v2.3)
-
-| Control Type | Purpose | When Used |
-|--------------|---------|-----------|
-| **Timed Charge Slot** | Buy cheap import | Negative/low Agile prices (<15p) |
-| **Timed Discharge Slot** | Sell high export | Profitable arbitrage (export > import + 1p) |
-| **Feed-in Priority Mode** | Route solar to grid first | Clipping prevention (battery full + high solar) |
-| **Self Use Mode** | Battery-first solar routing | Default operation |
-
-### AI Load Forecasting
-
-Multi-method ensemble prediction:
-
-```
-┌────────────────────────────────────┐
-│  Yesterday same time    (weight 3) │
-│  Last week same time    (weight 2) │  → Weighted
-│  30-day hour average    (weight 1) │     Average
-│  Recent trend analysis  (weight 1.5)│
-└────────────────────────────────────┘
-         ↓
-   Confidence Score
-   (high/medium/low/very_low)
-```
-
-### Cost Optimization Logic
-
-**Example Decision Tree:**
-```
-Battery 45%, Solar 2kW, Load 1kW
-Import 13.27p, Export 15.00p
-
-1. Check arbitrage: 15.00p > 13.27p + 1.0p ✓
-   → Force Charge (buy cheap, sell expensive later!)
-   
-2. Solar surplus: 2kW - 1kW = 1kW
-   → Charge from solar simultaneously
-   
-3. Net result: Battery charges, cost = 13.27p for grid import
-   → Later export at 15.00p = 1.73p profit per kWh!
-```
+SolarBat-AI/
+├── apps/solar_optimizer/          # Core AppDaemon app (HACS installs this)
+│   ├── solar_optimizer.py         # Main orchestrator
+│   ├── forecast_accuracy_tracker.py
+│   ├── load_forecaster.py
+│   ├── plan_executor.py
+│   ├── planners/                  # Rule-based, LP, and ML planners
+│   ├── providers/                 # Data providers (pricing, solar, load, etc.)
+│   └── templates/                 # Web dashboard HTML/CSS/JS
+├── dashboards/                    # HA Lovelace card examples
+├── tests/                         # Test harness, scenarios, and dev tools
+├── docs/                          # Additional documentation
+├── hacs.json                      # HACS manifest
+└── README.md
 ```
 
-### Learning and Adaptation
+## Contributing
 
-The system learns from your actual usage:
+Pull requests welcome. The `tests/` directory contains a full test harness that connects to your HA instance for local development — see `tests/README.md` for details.
 
-- **Consumption patterns** - Tracks hourly usage by weekday/weekend
-- **Solar accuracy** - Compares Solcast forecasts to actual generation
-- **Wastage events** - Records when battery was full but solar was available
-- **Price patterns** - Understands typical Agile pricing for your region
+## License
 
----
+MIT — see [LICENSE](LICENSE).
 
-## 🔍 Monitoring
+## Acknowledgments
 
-### AppDaemon Logs
-
-Check logs for optimizer activity:
-
-```bash
-tail -f /config/appdaemon/appdaemon.log | grep "Solar"
-```
-
-### Sensors Created
-
-The optimizer creates these sensors in Home Assistant:
-
-- `sensor.solar_optimizer_plan` - The 24-hour plan with all details
-- `sensor.solar_wastage_risk` - Current solar wastage risk (kWh)
-- `sensor.solar_optimizer_capabilities` - Detected inverter capabilities
-
-### Understanding the Plan
-
-Each hourly step shows:
-- **Mode**: Force Charge / Grid First / Self Use
-- **Reason**: Why this decision was made
-- **Battery SOC**: Expected battery level
-- **Cost**: Estimated grid import cost
-- **Prices**: Both 30-min Agile slots
-
----
-
-## 🐛 Troubleshooting
-
-### No Plan Generated
-
-**Check AppDaemon logs:**
-```bash
-tail -f /config/appdaemon/appdaemon.log
-```
-
-**Common issues:**
-- Missing sensor entities (check entity IDs in config)
-- Octopus integration not providing Agile rates
-- Solcast not configured or API limit reached
-
-**Solution:**
-```bash
-# Verify all sensors exist
-ha states sensor.solax_battery_soc
-ha states sensor.octopus_energy_electricity_xxxxx_current_rate
-```
-
-### Mode Changes Too Frequently
-
-The optimizer has built-in rate limiting but you can adjust:
-
-```yaml
-min_change_interval: 7200  # Increase to 2 hours
-```
-
-### Pre-emptive Discharge Not Triggering
-
-**Check settings:**
-```yaml
-enable_preemptive_discharge: true
-min_wastage_threshold: 1.0  # Lower to 0.5 to trigger sooner
-min_benefit_threshold: 0.25  # Lower to require less financial benefit
-```
-
-**Check wastage sensor:**
-- Look at `sensor.solar_wastage_risk`
-- If it's 0, there's no wastage risk detected
-
-### Inverter Not Responding to Mode Changes
-
-**Verify:**
-1. The `inverter_mode` entity ID is correct
-2. The select options match your inverter exactly (case-sensitive)
-3. The solax_modbus integration is working
-
-**Test manually:**
-```yaml
-# Try changing mode manually via Developer Tools → Services
-service: select.select_option
-target:
-  entity_id: select.solax_charger_use_mode
-data:
-  option: "Self Use"
-```
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! 
-
-### How to Contribute
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Test thoroughly
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-### Areas for Contribution
-
-- Support for other inverter brands
-- Support for other tariffs (Octopus Flux, etc.)
-- Improved solar forecasting (integration with other services)
-- Machine learning for consumption prediction
-- Home Assistant UI panel
-- Documentation improvements
-
----
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- Built for the Home Assistant community
-- Inspired by Predbat (but with less complexity and inverter writes!)
-- Thanks to all contributors and testers
-- Special thanks to the Solax ModBus integration developers
-- Thanks to Octopus Energy for their innovative Agile tariff
-
----
-
-## 📞 Support
-
-### Getting Help
-
-1. **Check the docs** - [docs/](docs/) folder has detailed guides
-2. **Search issues** - Your question may already be answered
-3. **Open an issue** - Include logs and configuration (remove sensitive data!)
-4. **Discussions** - For general questions and sharing experiences
-
-### Useful Links
-
-- [Home Assistant Community Forum](https://community.home-assistant.io/)
-- [Octopus Energy Integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy)
-- [Solcast Integration](https://github.com/BJReplay/ha-solcast-solar)
-- [Solax ModBus Integration](https://github.com/wills106/homeassistant-solax-modbus)
-
----
-
-## 📈 Roadmap
-
-### v2.1 (Planned)
-- [ ] Support for Octopus Flux tariff
-- [ ] Better handling of battery degradation
-- [ ] Cost tracking and savings reporting
-- [ ] Mobile notifications for key events
-
-### v2.2 (Future)
-- [ ] Support for multiple batteries
-- [ ] Integration with electric vehicle charging
-- [ ] Weather-aware optimization
-- [ ] Machine learning consumption predictions
-
----
-
-## ⚠️ Disclaimer
-
-This software is provided as-is. Always monitor your system's behavior initially and ensure it's working as expected. The authors are not responsible for any issues with your inverter, battery, or electricity costs.
-
-**Best practices:**
-- Start with conservative settings
-- Monitor for the first few days
-- Keep `min_change_interval` at least 1 hour initially
-- Don't discharge below 20% SOC until you're confident it's working
-
----
-
-**Version:** 2.0.0  
-**Last Updated:** January 2026  
-**Maintained by:** Community contributors
+Built with Solcast, Octopus Energy API, and the Home Assistant + AppDaemon ecosystem.
