@@ -105,7 +105,7 @@ class MLPlanner(BasePlanner):
         peak_price = pricing.get('peak_avg_p', 28.0)
         price_spread = peak_price - overnight_price
         export_price = pricing.get('export_fixed_p', 15.0)
-        arbitrage_margin = peak_price - overnight_price - 1.0  # After round-trip losses
+        arbitrage_margin = (peak_price * 0.90) - overnight_price  # 90% round-trip efficiency
         
         features = np.array([
             # Battery (3)
@@ -735,6 +735,10 @@ class MLPlanner(BasePlanner):
                               min_soc, max_soc):
         """Decide mode using ML-guided strategies"""
         
+        # Round-trip efficiency constants
+        round_trip_efficiency = 0.85
+        min_profit_margin = 2.0  # pence per kWh
+        
         # Pre-sunrise discharge
         if presunrise_strategy['use_strategy']:
             slot_time = slot['time']
@@ -746,17 +750,38 @@ class MLPlanner(BasePlanner):
                 soc_change = -(discharge_kwh / battery_capacity) * 100
                 return 'Force Discharge', f"ML-guided pre-sunrise discharge", soc_change
         
-        # Feed-in Priority
+        # Feed-in Priority: grid gets first 5kW, battery charges from overflow
         if feed_in_strategy['use_strategy']:
             slot_time = slot['time']
             if (feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']):
-                return 'Feed-in Priority', f"ML-guided grid-first routing", 0
+                solar_kw = solar_kwh * 2  # Convert back to kW (solar_kwh is per 30min)
+                # Only use Feed-in Priority when there's actual solar to route
+                if solar_kw > 0.5:
+                    load_kw = load_kwh * 2
+                    grid_kw = min(solar_kw, 5.0)
+                    after_grid = max(0, solar_kw - grid_kw)
+                    load_from_solar = min(after_grid, load_kw)
+                    battery_charge_kw = max(0, after_grid - load_from_solar)
+                    
+                    charge_kwh = min(battery_charge_kw * 0.5,
+                                   (max_soc - current_soc) / 100 * battery_capacity)
+                    soc_change = (charge_kwh / battery_capacity) * 100
+                    
+                    # Load not covered drains battery
+                    if load_from_solar < load_kw:
+                        drain_kw = load_kw - load_from_solar
+                        drain_kwh = min(drain_kw * 0.5, (current_soc - min_soc) / 100 * battery_capacity)
+                        soc_change -= (drain_kwh / battery_capacity) * 100
+                    
+                    return 'Feed-in Priority', f"ML-guided grid-first routing", soc_change
         
-        # Arbitrage
-        if export_price > import_price + 1.0 and current_soc < 92:
+        # Arbitrage: only if profitable after round-trip losses
+        break_even_export = import_price / round_trip_efficiency
+        if export_price > break_even_export + min_profit_margin and current_soc < 92:
             charge_kwh = min(max_charge_rate * 0.5, ((92 - current_soc) / 100) * battery_capacity)
             soc_change = (charge_kwh / battery_capacity) * 100
-            return 'Force Charge', f"Arbitrage opportunity", soc_change
+            net_profit = (export_price * round_trip_efficiency) - import_price
+            return 'Force Charge', f"Arbitrage: {net_profit:.1f}p/kWh profit after losses", soc_change
         
         # Deficit prevention
         if future_deficit > 0.5 and import_price <= future_min_price + 1.0:
@@ -770,11 +795,12 @@ class MLPlanner(BasePlanner):
             soc_change = -(discharge_kwh / battery_capacity) * 100
             return 'Force Discharge', f"Wastage prevention", soc_change
         
-        # Peak discharge
-        if import_price > 25.0 and current_soc > min_soc + 10:
+        # Profitable export: only if export revenue covers recharge cost + losses
+        discharge_profit = export_price * round_trip_efficiency - import_price
+        if discharge_profit > min_profit_margin and current_soc > min_soc + 10:
             discharge_kwh = min(max_discharge_rate * 0.5, ((current_soc - min_soc) / 100) * battery_capacity)
             soc_change = -(discharge_kwh / battery_capacity) * 100
-            return 'Force Discharge', f"Peak discharge", soc_change
+            return 'Force Discharge', f"Profitable export: {discharge_profit:.1f}p/kWh after losses", soc_change
         
         # Default: Self-Use
         return 'Self Use', "Self-use mode", 0

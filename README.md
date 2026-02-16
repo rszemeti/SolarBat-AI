@@ -36,31 +36,33 @@ Accessible at `http://<your-HA-IP>:5050/api/appdaemon/solar_plan` with four tabs
 
 ## Installation
 
-### Via HACS (Recommended)
+### Via Add-on (Recommended)
 
-1. Install [HACS](https://hacs.xyz/) if you haven't already
-2. In HACS, go to **Settings** → enable **AppDaemon apps discovery & tracking**
-3. Go to HACS → **⋮** menu → **Custom repositories**
-4. Add `https://github.com/YOUR_USERNAME/SolarBat-AI` with category **AppDaemon**
-5. Find SolarBat-AI in HACS and click **Download**
-6. Configure `apps.yaml` (see below)
-7. Restart AppDaemon
+The simplest way to install SolarBat-AI is as a standalone Home Assistant add-on. No separate AppDaemon add-on is required.
 
-### Manual Installation
+1. Go to **Settings → Add-ons → Add-on Store**
+2. Click **⋮** (top right) → **Repositories**
+3. Add: `https://github.com/YOUR_USERNAME/solarbat-ai-addon`
+4. Click **Close**, refresh the page
+5. Find **SolarBat-AI**, click **Install**
+6. Click **Start** — the addon creates a template `apps.yaml`
+7. Click **Stop**, then edit `apps.yaml` in `/addon_configs/xxx_solarbat-ai/`
+8. Update sensor entity IDs to match your system (see Configuration below)
+9. Remove the `Template: True` line
+10. Click **Start** again
+
+The web dashboard is accessible via the **Open Web UI** button once running.
+
+### Manual Installation (Advanced)
+
+If you prefer to run AppDaemon separately or develop locally:
 
 ```bash
-cd /config/appdaemon/apps
-git clone https://github.com/YOUR_USERNAME/SolarBat-AI.git
+cd /addon_configs/a0d7b954_appdaemon/apps
+git clone https://github.com/YOUR_USERNAME/SolarBat-AI.git solar_optimizer
 ```
 
-### AppDaemon Config
-
-Make sure your `appdaemon.yaml` has the app directory set correctly:
-
-```yaml
-appdaemon:
-  app_dir: /homeassistant/appdaemon/apps
-```
+Then copy `apps.yaml.example` to your AppDaemon `apps.yaml` and configure.
 
 ## Configuration
 

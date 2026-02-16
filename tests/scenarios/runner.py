@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import time
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repo root to path
+REPO_ROOT = str(Path(__file__).parent.parent.parent)
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
 
 from apps.solar_optimizer.planners import RuleBasedPlanner
 
@@ -86,7 +88,7 @@ class ScenarioRunner:
         if category:
             categories = [category]
         else:
-            categories = ['typical', 'edge_cases', 'stress_tests']
+            categories = ['typical', 'edge_cases', 'stress_tests', 'realistic_systems']
         
         for cat in categories:
             cat_dir = os.path.join(self.scenarios_dir, cat)

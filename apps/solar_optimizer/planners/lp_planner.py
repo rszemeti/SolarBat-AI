@@ -160,25 +160,33 @@ class LinearProgrammingPlanner(BasePlanner):
         prob += soc[0] == battery_soc, "Initial_SOC"
         
         # 2. Energy balance for each slot
+        # Round-trip efficiency: ~95% charge, ~95% discharge (90% combined)
+        charge_efficiency = 0.95  # AC → battery: 5% loss
+        discharge_efficiency = 0.95  # Battery → AC: 5% loss
+        
         for t in range(n_slots):
             solar_kw = solar_forecast[t]['kw']
             load_kw = load_forecast[t]['load_kw']
             
             # Battery energy change (30 min = 0.5h)
-            battery_kwh_change = (battery_charge[t] - battery_discharge[t]) * 0.5
+            # Charging: only charge_efficiency of input reaches battery
+            # Discharging: only discharge_efficiency of stored energy reaches output
+            battery_kwh_in = battery_charge[t] * charge_efficiency * 0.5
+            battery_kwh_out = battery_discharge[t] * 0.5  # Full kW drawn from battery
             
-            # SOC change (as percentage)
-            soc_change = (battery_kwh_change / battery_capacity) * 100
+            # SOC change (as percentage) - what actually enters/leaves the battery
+            soc_change = ((battery_kwh_in - battery_kwh_out) / battery_capacity) * 100
             
             prob += soc[t+1] == soc[t] + soc_change, f"SOC_Balance_{t}"
             
-            # CORRECT Energy balance:
-            # Energy IN: solar + grid_import + battery_discharge
+            # CORRECT Energy balance (AC side):
+            # Energy IN: solar + grid_import + battery_discharge * discharge_efficiency
             # Energy OUT: load + battery_charge + grid_export + clipping
             # 
-            # solar + grid_import + battery_discharge = load + battery_charge + grid_export + clipped_solar
-            # Rearranged: grid_import + battery_discharge - battery_charge - grid_export = load + clipped_solar - solar
-            prob += (grid_import[t] + battery_discharge[t] - battery_charge[t] - grid_export[t] == 
+            # Discharge efficiency: only 95% of battery output reaches AC bus
+            # Charge: full kW drawn from AC side (losses are on battery side, handled in SOC)
+            prob += (grid_import[t] + battery_discharge[t] * discharge_efficiency 
+                    - battery_charge[t] - grid_export[t] == 
                     load_kw + clipped_solar[t] - solar_kw), f"Grid_Balance_{t}"
         
         # 3. Can't charge and discharge simultaneously

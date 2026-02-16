@@ -18,8 +18,11 @@ import sys
 import os
 from datetime import datetime, timedelta
 
-# Add parent directory to path
+# Add parent directory and apps to path
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
 
 from test_data import TestDataGenerator
 from apps.solar_optimizer.plan_creator import PlanCreator

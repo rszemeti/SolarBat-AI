@@ -17,6 +17,13 @@ import requests
 from datetime import datetime, time, timedelta
 from typing import Dict, Optional, Any
 
+# Ensure repo root is on the path (works whether run from tests/ or repo root)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+if os.path.join(REPO_ROOT, 'apps', 'solar_optimizer') not in sys.path:
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
+
 # Try to load dotenv, but don't fail if not installed yet
 try:
     from dotenv import load_dotenv
@@ -428,7 +435,7 @@ def test_pricing_provider(hass):
     import sys
     import importlib.util
     
-    sys.path.insert(0, './apps/solar_optimizer')
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
     
     try:
         # Load modules directly to avoid relative import issues
@@ -510,7 +517,7 @@ def test_inverter_interface(hass):
     import sys
     import importlib.util
     
-    sys.path.insert(0, './apps/solar_optimizer')
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
     
     try:
         # Load base interface first
@@ -652,8 +659,8 @@ def run_planner_and_generate_plan(hass, planner_type='rule-based'):
         print("[ERROR] Please run from SolarBat-AI root directory")
         return None
     
-    sys.path.insert(0, './apps/solar_optimizer')
-    sys.path.insert(0, './apps')
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'apps', 'solar_optimizer'))
+    sys.path.insert(0, os.path.join(REPO_ROOT, 'apps'))
     
     try:
         # Use the new planner structure
@@ -1018,7 +1025,7 @@ def generate_plan_html(plan, accuracy_tracker=None):
         )
     except ImportError:
         try:
-            sys.path.insert(0, os.path.dirname(__file__))
+            sys.path.insert(0, REPO_ROOT)
             from apps.solar_optimizer.forecast_accuracy_tracker import (
                 generate_accuracy_html_parts, build_prediction_data, generate_settings_html_parts
             )
@@ -1029,11 +1036,11 @@ def generate_plan_html(plan, accuracy_tracker=None):
     
     # Load templates
     try:
-        with open('./templates/plan.html', 'r', encoding='utf-8') as f:
+        with open(os.path.join(REPO_ROOT, 'templates', 'plan.html'), 'r', encoding='utf-8') as f:
             html_template = f.read()
-        with open('./templates/plan.css', 'r', encoding='utf-8') as f:
+        with open(os.path.join(REPO_ROOT, 'templates', 'plan.css'), 'r', encoding='utf-8') as f:
             css_content = f.read()
-        with open('./templates/plan.js', 'r', encoding='utf-8') as f:
+        with open(os.path.join(REPO_ROOT, 'templates', 'plan.js'), 'r', encoding='utf-8') as f:
             js_content = f.read()
     except FileNotFoundError:
         return "<html><body><h1>Error: Template files not found in ./templates/</h1></body></html>"

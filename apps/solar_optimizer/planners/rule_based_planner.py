@@ -170,22 +170,34 @@ class RuleBasedPlanner(BasePlanner):
         self.log(f"Battery: {battery_capacity}kWh, Charge: {max_charge_rate}kW, Discharge: {max_discharge_rate}kW")
         
         # ============================================
-        # STRATEGIC DECISION: Should we use Feed-in Priority mode today?
+        # STRATEGIC DECISIONS: Feed-in Priority + Pre-sunrise Discharge
+        # These are interdependent:
+        # - Feed-in Priority needs to know post-discharge SOC
+        # - Pre-sunrise discharge needs to know if we're using Feed-in Priority
+        # Solution: Run feed-in first (may be wrong), then pre-sunrise, then re-run feed-in
         # ============================================
+        
+        # First pass: check feed-in with current SOC
         feed_in_priority_strategy = self._should_use_feed_in_priority_strategy(
-            slots, current_soc, battery_capacity, export_limit=5.0
+            slots, current_soc, battery_capacity, export_limit=5.0, max_charge_rate=max_charge_rate
         )
+        
+        # Calculate pre-sunrise discharge
+        presunrise_discharge_strategy = self._calculate_presunrise_discharge_strategy(
+            slots, current_soc, battery_capacity, max_discharge_rate, feed_in_priority_strategy
+        )
+        
+        # If pre-sunrise discharge will happen, re-run feed-in with post-discharge SOC
+        if presunrise_discharge_strategy['use_strategy']:
+            post_discharge_soc = presunrise_discharge_strategy['target_soc']
+            if post_discharge_soc != current_soc:
+                feed_in_priority_strategy = self._should_use_feed_in_priority_strategy(
+                    slots, post_discharge_soc, battery_capacity, export_limit=5.0, max_charge_rate=max_charge_rate
+                )
         
         if feed_in_priority_strategy['use_strategy']:
             self.log(f"📊 STRATEGIC DECISION: Feed-in Priority mode {feed_in_priority_strategy['start_time'].strftime('%H:%M')}-{feed_in_priority_strategy['end_time'].strftime('%H:%M')}")
             self.log(f"   Reason: {feed_in_priority_strategy['reason']}")
-        
-        # ============================================
-        # STRATEGIC DECISION: Do we need pre-sunrise discharge?
-        # ============================================
-        presunrise_discharge_strategy = self._calculate_presunrise_discharge_strategy(
-            slots, current_soc, battery_capacity, max_discharge_rate, feed_in_priority_strategy
-        )
         
         if presunrise_discharge_strategy['use_strategy']:
             self.log(f"🌅 PRE-SUNRISE DISCHARGE: {presunrise_discharge_strategy['start_time'].strftime('%H:%M')}-{presunrise_discharge_strategy['end_time'].strftime('%H:%M')}")
@@ -280,142 +292,207 @@ class RuleBasedPlanner(BasePlanner):
         return plan
     
     def _should_use_feed_in_priority_strategy(self, slots: List[Dict], current_soc: float, 
-                                               battery_capacity: float, export_limit: float = 5.0) -> Dict:
+                                               battery_capacity: float, export_limit: float = 5.0,
+                                               max_charge_rate: float = None) -> Dict:
         """
-        Strategic decision: Should we use Feed-in Priority, and when to transition to Self-Use?
+        Strategic decision: Should we use Feed-in Priority to maximise energy harvest?
         
-        NEW APPROACH: Work backwards from midnight to find optimal transition point.
-        This ensures battery doesn't run out in the evening while maximizing feed-in revenue.
+        INVERTER PHYSICS (Solis with solax_modbus):
+        - DC clipping limit: ~13kW (inverter max)
+        - Grid export limit: 5kW
+        - Battery charge rate: ~8kW max
         
-        Logic:
-        1. Start at midnight (tomorrow) with target SOC (e.g., 15%)
-        2. Work backwards, simulating Self-Use mode
-        3. Find the point where battery would overflow if we continued Self-Use earlier
-        4. That's our Feed-in Priority → Self-Use transition point
+        THE PROBLEM:
+        In Self-Use, battery charges first (up to 8kW), grid gets overflow (up to 5kW).
+        Battery fills quickly. Once full: total harvest = 5kW + load. Rest is CLIPPED.
+        
+        In Feed-in Priority, grid gets first 5kW, battery gets (solar - 5kW - load).
+        Battery fills slowly → stays not-full longer → more total energy harvested.
+        
+        STRATEGY:
+        1. Forward sim in Self-Use: does battery ever hit 95%? If not, no clipping risk.
+        2. If yes, use Feed-in Priority from first solar to delay battery filling.
+        3. Find transition point (Feed-in → Self-Use) by working BACKWARDS from end
+           of solar window: simulate Self-Use backwards, find where SOC would hit 95%.
+           Everything before that = Feed-in Priority, everything after = Self-Use.
+        4. This ensures battery fills to exactly 95% right at end of solar, not before.
+        
+        ADAPTIVE: When re-planning mid-day (e.g. cloudy morning, SOC still low),
+        the backwards sim finds an earlier transition or no Feed-in at all.
         
         Returns:
-            Dict with:
-                - use_strategy: bool
-                - start_time: datetime (when to start Feed-in Priority)
-                - end_time: datetime (when to transition to Self-Use)
-                - reason: str (explanation)
+            Dict with use_strategy, start_time, end_time, reason
         """
-        # Use the first slot's time as "now" for scenario planning
-        # (handles both real-time and test scenarios with arbitrary dates)
-        now = slots[0]['time'] if slots else datetime.now()
-        morning_start = now.replace(hour=6, minute=0, second=0, microsecond=0)
-        if now.hour >= 6:
-            morning_start = now
+        if not slots:
+            return {'use_strategy': False, 'start_time': None, 'end_time': None, 
+                    'reason': 'No slots to analyze'}
         
-        evening_end = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        max_soc = 95.0
+        max_charge_rate_kw = max_charge_rate if max_charge_rate else battery_capacity / 4
         
-        total_solar_kwh = 0
-        total_load_kwh = 0
-        peak_solar_kw = 0
+        # ── Step 1: Quick forward sim in Self-Use to check if clipping occurs ──
+        sim_soc = current_soc
+        clipped_kwh = 0
+        su_full_at_idx = None
         
-        for slot in slots:
-            slot_time = slot['time']
-            if morning_start <= slot_time <= evening_end:
-                solar_kw = slot.get('solar_kw', 0)
-                load_kw = slot.get('load_kw', 0)
-                total_solar_kwh += solar_kw * 0.5
-                total_load_kwh += load_kw * 0.5
-                peak_solar_kw = max(peak_solar_kw, solar_kw)
-        
-        battery_headroom_kwh = ((95 - current_soc) / 100) * battery_capacity
-        net_solar_surplus = total_solar_kwh - total_load_kwh
-        
-        # Quick bailout: If no clipping risk, no need for Feed-in Priority
-        # Trigger if either:
-        # 1. Net surplus exceeds battery space by 2kWh+ (will clip battery)
-        # 2. Peak solar exceeds export limit (will clip export)
-        will_overflow_battery = net_solar_surplus > battery_headroom_kwh + 2.0
-        will_clip_export = peak_solar_kw > export_limit
-        
-        will_clip = will_overflow_battery or will_clip_export
-        
-        if not will_clip:
-            return {
-                'use_strategy': False,
-                'start_time': None,
-                'end_time': None,
-                'reason': f"No clipping risk: {total_solar_kwh:.1f}kWh solar fits in {battery_headroom_kwh:.1f}kWh space"
-            }
-        
-        # BACKWARDS SIMULATION: Find optimal transition point
-        target_soc_midnight = 15.0  # Want battery at 15% by midnight
-        simulated_soc = target_soc_midnight
-        transition_slot_idx = None
-        
-        # Work backwards from end of day
-        for i in range(len(slots) - 1, -1, -1):
-            slot = slots[i]
-            slot_time = slot['time']
+        for i, slot in enumerate(slots):
             solar_kw = slot.get('solar_kw', 0)
             load_kw = slot.get('load_kw', 0)
             
-            # Only simulate daytime hours (before 10pm)
-            if slot_time.hour >= 22:
-                # Evening/night: always Self-Use, battery supplies load
-                net_kw = solar_kw - load_kw  # Usually negative at night
-                kwh_change = net_kw * 0.5
-                soc_change = (kwh_change / battery_capacity) * 100
-                simulated_soc -= soc_change  # Going backwards!
-                continue
+            net_solar = max(0, solar_kw - load_kw)
             
-            # Daytime: Check if Self-Use would cause overflow
-            net_kw = solar_kw - load_kw
+            # Battery charges from net solar (capped at charge rate and headroom)
+            headroom_kwh = max(0, (max_soc - sim_soc) / 100 * battery_capacity)
+            battery_charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5, headroom_kwh)
             
-            if net_kw > 0:  # Net generation
-                kwh_change = net_kw * 0.5
-                soc_change = (kwh_change / battery_capacity) * 100
-                potential_soc = simulated_soc + soc_change
-                
-                # Would battery overflow if we used Self-Use?
-                if potential_soc > 95.0:
-                    # Found it! This is where we need Feed-in Priority
-                    transition_slot_idx = i
-                    break
-                else:
-                    # Self-Use is safe, battery won't overflow
-                    simulated_soc = potential_soc
-            else:
-                # Net consumption - battery drains (going backwards = charging)
-                kwh_change = net_kw * 0.5
-                soc_change = (kwh_change / battery_capacity) * 100
-                simulated_soc -= soc_change
+            # Remaining goes to grid (capped at export limit)
+            remaining_kw = net_solar - (battery_charge_kwh * 2)  # Back to kW
+            grid_export_kw = min(remaining_kw, export_limit)
+            clipped_kw = max(0, remaining_kw - export_limit)
+            
+            sim_soc = min(max_soc, sim_soc + (battery_charge_kwh / battery_capacity) * 100)
+            clipped_kwh += clipped_kw * 0.5
+            
+            # Battery drains from load when solar < load
+            if solar_kw < load_kw:
+                drain_kwh = min((load_kw - solar_kw) * 0.5, (sim_soc - 10) / 100 * battery_capacity)
+                sim_soc = max(10, sim_soc - (drain_kwh / battery_capacity) * 100)
+            
+            if sim_soc >= max_soc and su_full_at_idx is None and net_solar > 0.5:
+                su_full_at_idx = i
         
-        if transition_slot_idx is not None:
-            # Found transition point - use Feed-in Priority before this, Self-Use after
-            transition_slot = slots[transition_slot_idx]
-            
-            # Find start of solar (first slot > 1kW)
-            strategy_start = None
-            for slot in slots:
-                if slot.get('solar_kw', 0) > 1.0:
-                    strategy_start = slot['time']
-                    break
-            
-            # Transition time
-            strategy_end = transition_slot['time']
-            
-            # Calculate what SOC we'd end up at midnight with this strategy
-            final_soc_estimate = simulated_soc
-            
-            return {
-                'use_strategy': True,
-                'start_time': strategy_start or morning_start,
-                'end_time': strategy_end,
-                'reason': f"High solar day: {total_solar_kwh:.1f}kWh solar, {battery_headroom_kwh:.1f}kWh space, {net_solar_surplus:.1f}kWh surplus → Feed-in Priority until {strategy_end.strftime('%H:%M')}, then Self-Use (ends ~{final_soc_estimate:.0f}% SOC)"
-            }
-        else:
-            # Entire day can be Self-Use without overflow
+        # No clipping in Self-Use? No need for Feed-in Priority
+        if clipped_kwh < 1.0:
             return {
                 'use_strategy': False,
                 'start_time': None,
                 'end_time': None,
-                'reason': f"Battery can handle all solar with Self-Use (simulated EOD SOC: {simulated_soc:.0f}%)"
+                'reason': f"No clipping risk: only {clipped_kwh:.1f}kWh clipped in Self-Use"
             }
+        
+        # ── Step 2: Find Feed-in Priority window ──
+        # Start: first slot with meaningful solar
+        fi_start_idx = None
+        for i, slot in enumerate(slots):
+            if slot.get('solar_kw', 0) > 0.5:
+                fi_start_idx = i
+                break
+        
+        if fi_start_idx is None:
+            return {'use_strategy': False, 'start_time': None, 'end_time': None,
+                    'reason': 'No solar slots found'}
+        
+        # End of solar window: last slot with meaningful solar
+        fi_solar_end_idx = fi_start_idx
+        for i, slot in enumerate(slots):
+            if slot.get('solar_kw', 0) > 0.5:
+                fi_solar_end_idx = i
+        
+        # ── Step 3: Backwards simulation to find transition point ──
+        # Start at end of solar window with target SOC = 95% (we want battery full by then)
+        # Work backwards in Self-Use mode
+        # When SOC exceeds 95% going backwards (meaning it would overflow), that's where
+        # we need to stop Self-Use and switch to Feed-in Priority
+        
+        backward_soc = max_soc  # Battery should be full at end of solar
+        transition_idx = fi_start_idx  # Default: Feed-in Priority the whole solar window
+        
+        for i in range(fi_solar_end_idx, fi_start_idx - 1, -1):
+            slot = slots[i]
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            
+            net_solar = solar_kw - load_kw
+            
+            if net_solar > 0:
+                # Going backwards: Self-Use would charge battery, so we subtract
+                # (in forward time this slot would add to SOC)
+                charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5)
+                soc_change = (charge_kwh / battery_capacity) * 100
+                potential_soc = backward_soc - soc_change  # Remove this slot's contribution
+                
+                if potential_soc < current_soc:
+                    # We've unwound back to current SOC - transition here
+                    transition_idx = i
+                    break
+                    
+                backward_soc = potential_soc
+            else:
+                # Net consumption: in forward time battery drains, going backwards we add
+                drain_kwh = abs(net_solar) * 0.5
+                soc_change = (drain_kwh / battery_capacity) * 100
+                backward_soc = min(max_soc, backward_soc + soc_change)
+            
+            transition_idx = i
+        
+        # ── Step 4: Validate - simulate Feed-in Priority forward to check improvement ──
+        fi_soc = current_soc
+        fi_clipped = 0
+        fi_full_at_idx = None
+        
+        for i in range(fi_start_idx, fi_solar_end_idx + 1):
+            slot = slots[i]
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            
+            if i < transition_idx:
+                # Feed-in Priority: grid gets first 5kW, remainder to load+battery
+                grid_kw = min(solar_kw, export_limit)
+                after_grid = solar_kw - grid_kw
+                load_from_solar = min(after_grid, load_kw)
+                after_load = after_grid - load_from_solar
+                
+                # Battery charges from remainder
+                headroom = max(0, (max_soc - fi_soc) / 100 * battery_capacity)
+                charge_kwh = min(after_load * 0.5, max_charge_rate_kw * 0.5, headroom)
+                fi_soc = min(max_soc, fi_soc + (charge_kwh / battery_capacity) * 100)
+                fi_clipped += max(0, after_load * 0.5 - charge_kwh)
+                
+                # Load not covered by solar drains battery
+                if load_from_solar < load_kw:
+                    drain = min((load_kw - load_from_solar) * 0.5, (fi_soc - 10) / 100 * battery_capacity)
+                    fi_soc = max(10, fi_soc - (drain / battery_capacity) * 100)
+            else:
+                # Self-Use: battery charges first
+                net_solar = max(0, solar_kw - load_kw)
+                headroom = max(0, (max_soc - fi_soc) / 100 * battery_capacity)
+                charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5, headroom)
+                remaining = net_solar - charge_kwh * 2
+                grid_kw = min(remaining, export_limit)
+                fi_clipped += max(0, remaining - export_limit) * 0.5
+                fi_soc = min(max_soc, fi_soc + (charge_kwh / battery_capacity) * 100)
+                
+                if solar_kw < load_kw:
+                    drain = min((load_kw - solar_kw) * 0.5, (fi_soc - 10) / 100 * battery_capacity)
+                    fi_soc = max(10, fi_soc - (drain / battery_capacity) * 100)
+            
+            if fi_soc >= max_soc and fi_full_at_idx is None:
+                fi_full_at_idx = i
+        
+        clip_saved = clipped_kwh - fi_clipped
+        
+        if clip_saved < 2.0:  # Need at least 2kWh savings to justify Feed-in Priority mode
+            return {
+                'use_strategy': False,
+                'start_time': None,
+                'end_time': None,
+                'reason': f"Feed-in Priority only saves {clip_saved:.1f}kWh - not worth it"
+            }
+        
+        start_time = slots[fi_start_idx]['time']
+        transition_time = slots[transition_idx]['time']
+        su_full_time = slots[su_full_at_idx]['time'].strftime('%H:%M') if su_full_at_idx is not None else 'never'
+        fi_full_time = slots[fi_full_at_idx]['time'].strftime('%H:%M') if fi_full_at_idx is not None else 'never'
+        
+        return {
+            'use_strategy': True,
+            'start_time': start_time,
+            'end_time': transition_time,
+            'reason': (f"Saves {clip_saved:.1f}kWh: "
+                      f"battery full at {su_full_time} (Self-Use) vs {fi_full_time} (Feed-in) → "
+                      f"Feed-in {start_time.strftime('%H:%M')}-{transition_time.strftime('%H:%M')}, "
+                      f"then Self-Use")
+        }
     
     def _calculate_presunrise_discharge_strategy(self, slots: List[Dict], current_soc: float,
                                                   battery_capacity: float, max_discharge_rate: float,
@@ -453,45 +530,52 @@ class RuleBasedPlanner(BasePlanner):
         if not sunrise_time or sunrise_time <= now:
             return {'use_strategy': False, 'reason': 'No sunrise time found or already past'}
         
-        # Calculate total solar that will arrive during Feed-in Priority window
-        # (or all day if no Feed-in Priority)
-        total_solar_kwh = 0
-        total_load_kwh = 0
+        # Calculate how much the battery will actually absorb
+        # In Feed-in Priority: grid gets first 5kW, load from remainder, battery gets overflow
+        # In Self-Use: battery gets first, grid gets overflow
+        # We need space for what the battery will actually receive, not total solar
+        export_limit = 5.0
+        battery_absorption_kwh = 0
         
-        if feed_in_strategy['use_strategy']:
-            # Only count solar during Feed-in Priority window
-            for slot in slots:
+        for slot in slots:
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            
+            if solar_kw < 0.5:
+                continue
+            
+            if feed_in_strategy['use_strategy']:
                 slot_time = slot['time']
-                if (feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']):
-                    total_solar_kwh += slot.get('solar_kw', 0) * 0.5
-                    total_load_kwh += slot.get('load_kw', 0) * 0.5
-        else:
-            # Count all daytime solar (6am-6pm)
-            morning = now.replace(hour=6, minute=0)
-            evening = now.replace(hour=18, minute=0)
-            for slot in slots:
-                slot_time = slot['time']
-                if morning <= slot_time <= evening:
-                    total_solar_kwh += slot.get('solar_kw', 0) * 0.5
-                    total_load_kwh += slot.get('load_kw', 0) * 0.5
-        
-        # Calculate net solar that needs battery space
-        net_solar_kwh = total_solar_kwh - total_load_kwh
+                if feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']:
+                    # Feed-in Priority: grid gets 5kW first, then load, battery gets rest
+                    after_grid = max(0, solar_kw - export_limit)
+                    after_load = max(0, after_grid - load_kw)
+                    battery_absorption_kwh += after_load * 0.5
+                else:
+                    # Self-Use slots: battery gets solar - load
+                    net = max(0, solar_kw - load_kw)
+                    battery_absorption_kwh += net * 0.5
+            else:
+                # All Self-Use: battery gets solar - load
+                net = max(0, solar_kw - load_kw)
+                battery_absorption_kwh += net * 0.5
         
         # Calculate current battery space (current to 95%)
         current_space_kwh = ((95 - current_soc) / 100) * battery_capacity
         
         # Do we need to create more space?
-        space_shortfall = net_solar_kwh - current_space_kwh
+        space_shortfall = battery_absorption_kwh - current_space_kwh
         
         if space_shortfall <= 1.0:  # 1kWh margin
-            return {'use_strategy': False, 'reason': f'Sufficient space: {current_space_kwh:.1f}kWh available, {net_solar_kwh:.1f}kWh needed'}
+            return {'use_strategy': False, 'reason': f'Sufficient space: {current_space_kwh:.1f}kWh available for {battery_absorption_kwh:.1f}kWh absorption'}
         
-        # Calculate target SOC
-        # We need to discharge enough to fit the solar
-        # But don't go below 15% (min_soc)
-        target_space_kwh = min(net_solar_kwh + 2.0, battery_capacity * 0.80)  # Up to 80% space (down to 15% SOC)
-        target_soc = max(15.0, 95 - (target_space_kwh / battery_capacity * 100))
+        # Calculate target SOC - only discharge what we need + small buffer
+        # We already have current_space_kwh, we only need space_shortfall more
+        needed_discharge_kwh = space_shortfall + 2.0  # 2kWh buffer
+        # Don't discharge below 15% SOC
+        max_discharge_kwh = ((current_soc - 15.0) / 100) * battery_capacity
+        actual_discharge_kwh = min(needed_discharge_kwh, max_discharge_kwh)
+        target_soc = max(15.0, current_soc - (actual_discharge_kwh / battery_capacity * 100))
         
         discharge_needed_kwh = ((current_soc - target_soc) / 100) * battery_capacity
         
@@ -643,32 +727,56 @@ class RuleBasedPlanner(BasePlanner):
                 action = f"Pre-sunrise discharge to {target_soc:.0f}% (creating space for {presunrise_discharge_strategy['reason'].split('kWh')[0]}kWh solar)"
                 return mode, action, soc_change
         
-        # 0b. STRATEGIC FEED-IN PRIORITY MODE (Morning strategy for high solar days)
-        # Check if this slot falls within the Feed-in Priority window
+        # 0b. STRATEGIC FEED-IN PRIORITY MODE (maximise harvest on big solar days)
+        # Grid gets first 5kW, load from remainder, battery gets overflow
+        # CRITICAL: Only use when there's actual solar to route - pointless with 0kW solar
         if feed_in_priority_strategy['use_strategy']:
             slot_time = slot['time']
+            solar_kw = solar_kwh * 2  # Convert back to kW
             if (feed_in_priority_strategy['start_time'] <= slot_time <= 
-                feed_in_priority_strategy['end_time']):
+                feed_in_priority_strategy['end_time'] and solar_kw > 0.5):
                 mode = 'Feed-in Priority'
-                action = f"Grid-first solar routing ({feed_in_priority_strategy['reason'].split('→')[0]})"
-                # Let solar go to grid first, battery fills from overflow only
-                # Don't force any SOC change - let it happen naturally
-                soc_change = 0
+                reason = feed_in_priority_strategy['reason']
+                short_reason = reason.split('→')[0] if '→' in reason else reason[:80]
+                action = f"Grid-first solar routing ({short_reason})"
+                
+                # SOC simulation: grid gets first export_limit, then load, battery gets rest
+                grid_kw = min(solar_kw, 5.0)
+                after_grid_kw = max(0, solar_kw - grid_kw)
+                load_from_solar_kw = min(after_grid_kw, load_kwh * 2)
+                battery_charge_kw = max(0, after_grid_kw - load_from_solar_kw)
+                
+                # Battery charges from overflow
+                charge_kwh = min(battery_charge_kw * 0.5, 
+                               (max_soc - current_soc) / 100 * battery_capacity)
+                soc_change = (charge_kwh / battery_capacity) * 100
+                
+                # Load not covered by solar drains battery
+                if load_from_solar_kw < load_kwh * 2:
+                    drain_kw = load_kwh * 2 - load_from_solar_kw
+                    drain_kwh = min(drain_kw * 0.5, (current_soc - min_soc) / 100 * battery_capacity)
+                    soc_change -= (drain_kwh / battery_capacity) * 100
+                
                 return mode, action, soc_change
         
         # 1. ARBITRAGE OPPORTUNITY: If we can buy cheap and sell expensive later, do it!
-        # With 90% round-trip efficiency:
-        # - Buy 1kWh at Xp, store/retrieve at 90% = 0.9kWh
-        # - Sell 0.9kWh at Yp = revenue
-        # - Need Y > X + (X * 0.11) to profit (covers 10% loss + small margin)
-        # Simplified: if export > import + 1p, it's profitable
-        arbitrage_margin = 1.0  # Minimum 1p profit after round-trip losses
-        profitable_arbitrage = (export_price > import_price + arbitrage_margin)
+        # Round-trip efficiency is roughly 85-90%:
+        # - Charge efficiency: ~95% (AC → DC → battery)
+        # - Discharge efficiency: ~95% (battery → DC → AC)
+        # - Combined: ~90%, but real-world with inverter standby, BMS etc. closer to 85%
+        # 
+        # Example: Buy 1kWh at 15p, retrieve 0.85kWh, sell at 15p = 12.75p revenue
+        # Loss: 2.25p per kWh stored. Need export > import / 0.85 to break even.
+        # Simplified: export must be at least 20% higher than import to profit.
+        round_trip_efficiency = 0.85
+        min_profit_margin = 2.0  # Minimum 2p/kWh clear profit after losses
+        break_even_export = import_price / round_trip_efficiency
+        profitable_arbitrage = (export_price > break_even_export + min_profit_margin)
         
         if profitable_arbitrage and current_soc < 92:  # Allow up to 92% for arbitrage
             mode = 'Force Charge'
-            net_profit = export_price - import_price
-            action = f"Arbitrage opportunity: buy {import_price:.2f}p, sell {export_price:.2f}p = {net_profit:.2f}p profit/kWh"
+            net_profit = (export_price * round_trip_efficiency) - import_price
+            action = f"Arbitrage: buy {import_price:.1f}p, sell {export_price:.1f}p × {round_trip_efficiency:.0%} eff = {net_profit:.1f}p/kWh profit"
             charge_kwh = min(max_charge_rate * 0.5, (max_soc - current_soc) / 100 * battery_capacity)
             soc_change = (charge_kwh / battery_capacity) * 100
             return mode, action, soc_change
@@ -690,10 +798,14 @@ class RuleBasedPlanner(BasePlanner):
             soc_change = -(load_kwh - solar_kwh) / battery_capacity * 100
             return mode, action, max(-2, soc_change)
         
-        # 4. If export price > import price + margin, discharge (was already doing this)
-        if export_price > import_price + 2.0 and current_soc > 40:
+        # 4. PROFITABLE EXPORT: Discharge battery to grid if export price is high enough
+        # Only worth it if export revenue > cost of recharging later (accounting for losses)
+        # We'll need to buy back at ~import_price, losing ~15% round-trip
+        # So: export_price * efficiency must exceed what we'd pay to refill
+        discharge_profit = export_price * round_trip_efficiency - import_price
+        if discharge_profit > min_profit_margin and current_soc > 40:
             mode = 'Force Discharge'
-            action = f"Profitable export (earn {export_price:.2f}p vs pay {import_price:.2f}p)"
+            action = f"Profitable export: {export_price:.1f}p × {round_trip_efficiency:.0%} - {import_price:.1f}p refill = {discharge_profit:.1f}p/kWh profit"
             discharge_kwh = min(max_discharge_rate * 0.5, (current_soc - min_soc) / 100 * battery_capacity)
             soc_change = -(discharge_kwh / battery_capacity) * 100
             return mode, action, soc_change

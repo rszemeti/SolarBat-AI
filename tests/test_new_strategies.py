@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Add apps directory to path
-apps_path = Path(__file__).parent / 'apps' / 'solar_optimizer'
+apps_path = Path(__file__).parent.parent / 'apps' / 'solar_optimizer'
 sys.path.insert(0, str(apps_path))
 sys.path.insert(0, str(apps_path / 'planners'))
 

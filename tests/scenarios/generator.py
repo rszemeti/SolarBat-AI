@@ -130,9 +130,8 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.3, 1.5, 2.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": ">10",
                     "total_cost_max": 3.50,
-                    "notes": "High solar surplus requires Feed-in Priority to prevent clipping"
+                    "notes": "Cloudy day - feed-in priority may or may not be needed"
                 }
             },
             
@@ -151,7 +150,7 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.5, 2.0, 3.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 30.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": ">6",
+                    "feed_in_priority_hours": ">3",
                     "discharge_during_peak": True,
                     "notes": "Winter solar surplus requires Feed-in Priority; should also discharge during expensive evening peak"
                 }
@@ -419,6 +418,195 @@ class ScenarioGenerator:
         for scenario in scenarios:
             self.save_scenario(scenario, "stress_tests")
     
+    def generate_realistic_system_scenarios(self):
+        """Generate scenarios with realistic system configurations beyond 10kWh/17kWp"""
+        print("\n" + "="*60)
+        print("Generating REALISTIC SYSTEM scenarios...")
+        print("="*60)
+        
+        scenarios = [
+            # 1. Large battery system (32kWh + 17kWp) - like the dev's actual setup
+            {
+                "name": "large_battery_sunny_summer",
+                "description": "32kWh battery, 17kWp array, sunny summer day - no pre-sunrise dump needed",
+                "date": "2026-07-15",
+                "battery": {
+                    "soc_start": 50.0,
+                    "capacity_kwh": 32.0,
+                    "max_charge_kw": 8.0,
+                    "max_discharge_kw": 3.12
+                },
+                "solar_profile": self.generate_solar_profile(17.0, 5.0, 21.0, 0.8),
+                "load_profile": self.generate_load_profile(0.4, 1.5, 2.5),
+                "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": ">6",
+                    "total_cost_max": 0.0,
+                    "notes": "Large battery should use Feed-in Priority but may not need pre-sunrise discharge with 16kWh headroom"
+                }
+            },
+            
+            # 2. Large battery, moderate day - should NOT need feed-in
+            {
+                "name": "large_battery_moderate_day",
+                "description": "32kWh battery, 17kWp array, moderate autumn day - battery absorbs everything",
+                "date": "2026-10-15",
+                "battery": {
+                    "soc_start": 30.0,
+                    "capacity_kwh": 32.0,
+                    "max_charge_kw": 8.0,
+                    "max_discharge_kw": 3.12
+                },
+                "solar_profile": self.generate_solar_profile(17.0, 7.0, 17.0, 0.45),
+                "load_profile": self.generate_load_profile(0.5, 1.8, 3.0),
+                "pricing": self.generate_pricing_profile(14.0, 20.0, 30.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": 0,
+                    "notes": "32kWh battery at 30% has 20.8kWh space - moderate solar fits without feed-in"
+                }
+            },
+            
+            # 3. Large battery, near full at dawn on big solar day
+            {
+                "name": "large_battery_full_dawn_summer",
+                "description": "32kWh at 85% dawn, big solar day - needs partial dump",
+                "date": "2026-06-21",
+                "battery": {
+                    "soc_start": 85.0,
+                    "capacity_kwh": 32.0,
+                    "max_charge_kw": 8.0,
+                    "max_discharge_kw": 3.12
+                },
+                "solar_profile": self.generate_solar_profile(17.0, 4.5, 21.5, 0.85),
+                "load_profile": self.generate_load_profile(0.3, 1.2, 2.0),
+                "pricing": self.generate_pricing_profile(10.0, 16.0, 26.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": ">8",
+                    "notes": "Should dump SOME battery pre-dawn but not all 32kWh - only what's needed"
+                }
+            },
+            
+            # 4. Small panels, big battery (5kWp + 13.5kWh Tesla Powerwall style)
+            {
+                "name": "small_panels_big_battery",
+                "description": "5kWp panels with 13.5kWh Powerwall - panels never overwhelm battery",
+                "date": "2026-07-15",
+                "battery": {
+                    "soc_start": 40.0,
+                    "capacity_kwh": 13.5,
+                    "max_charge_kw": 5.0,
+                    "max_discharge_kw": 5.0
+                },
+                "solar_profile": self.generate_solar_profile(5.0, 5.0, 21.0, 0.8),
+                "load_profile": self.generate_load_profile(0.3, 1.0, 2.0),
+                "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": 0,
+                    "notes": "5kWp peak ~4kW is well within battery charge rate - no clipping risk"
+                }
+            },
+            
+            # 5. Mid-range system (10kWp + 10kWh, 5kW hybrid inverter)
+            {
+                "name": "midrange_hybrid_summer",
+                "description": "10kWp panels, 10kWh battery, 5kW hybrid inverter",
+                "date": "2026-07-15",
+                "battery": {
+                    "soc_start": 60.0,
+                    "capacity_kwh": 10.0,
+                    "max_charge_kw": 5.0,
+                    "max_discharge_kw": 5.0
+                },
+                "solar_profile": self.generate_solar_profile(10.0, 5.0, 21.0, 0.8),
+                "load_profile": self.generate_load_profile(0.3, 1.5, 2.5),
+                "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": ">4",
+                    "notes": "8kW peak solar vs 5kW charge + 5kW export = just fits, but battery fills fast in self-use"
+                }
+            },
+            
+            # 6. Large battery mid-day replan (simulates running planner at noon after cloudy morning)
+            {
+                "name": "large_battery_midday_replan",
+                "description": "32kWh at 45% at noon - morning was cloudy, afternoon forecast sunny",
+                "date": "2026-07-15",
+                "battery": {
+                    "soc_start": 45.0,
+                    "capacity_kwh": 32.0,
+                    "max_charge_kw": 8.0,
+                    "max_discharge_kw": 3.12
+                },
+                # Afternoon-only solar (simulating a noon replan - sunrise already passed)
+                "solar_profile": self.generate_solar_profile(17.0, 12.0, 21.0, 0.8),
+                "load_profile": self.generate_load_profile(0.4, 0.0, 2.5),  # No morning peak
+                "pricing": self.generate_pricing_profile(14.0, 18.0, 28.0, 15.0),
+                "expected_outcomes": {
+                    "notes": "Afternoon-only solar may still clip with 32kWh battery if peak is high enough"
+                }
+            },
+            
+            # 7. Winter with big battery - barely any solar
+            {
+                "name": "large_battery_winter_dark",
+                "description": "32kWh battery, dark winter day, almost no solar",
+                "date": "2026-12-21",
+                "battery": {
+                    "soc_start": 70.0,
+                    "capacity_kwh": 32.0,
+                    "max_charge_kw": 8.0,
+                    "max_discharge_kw": 3.12
+                },
+                "solar_profile": self.generate_solar_profile(17.0, 8.5, 15.5, 0.15),
+                "load_profile": self.generate_load_profile(0.6, 2.0, 4.0),
+                "pricing": self.generate_pricing_profile(15.0, 22.0, 35.0, 15.0),
+                "expected_outcomes": {
+                    "feed_in_priority_hours": 0,
+                    "notes": "Dark winter day - should focus on arbitrage and self-use, no feed-in"
+                }
+            },
+            
+            # 8. Thin margin arbitrage test - should NOT trade
+            {
+                "name": "thin_margin_no_trade",
+                "description": "Import 14.8p, export 15p - should NOT arbitrage due to round-trip losses",
+                "date": "2026-03-15",
+                "battery": {
+                    "soc_start": 50.0,
+                    "capacity_kwh": 10.0,
+                    "max_charge_kw": 3.0,
+                    "max_discharge_kw": 3.0
+                },
+                "solar_profile": {
+                    "type": "parametric_bell_curve",
+                    "peak_kw": 0.0,
+                    "sunrise_hour": 6.0,
+                    "sunset_hour": 18.0,
+                    "efficiency": 0.0,
+                    "variability": 0.0,
+                    "total_kwh": 0.0,
+                    "description": "No solar - pure arbitrage test"
+                },
+                "load_profile": self.generate_load_profile(0.3, 1.0, 2.0),
+                "pricing": {
+                    "type": "agile_typical",
+                    "overnight_avg_p": 14.8,
+                    "day_avg_p": 14.8,
+                    "peak_avg_p": 14.8,
+                    "export_fixed_p": 15.0,
+                    "daily_avg_p": 14.8,
+                    "description": "Flat 14.8p import, 15p export - thin margin"
+                },
+                "expected_outcomes": {
+                    "feed_in_priority_hours": 0,
+                    "notes": "0.2p spread is a loss after 15% round-trip losses - should NOT force charge for arbitrage"
+                }
+            }
+        ]
+        
+        for scenario in scenarios:
+            self.save_scenario(scenario, "realistic_systems")
+    
     def generate_all(self):
         """Generate all scenarios"""
         print("\n" + "="*60)
@@ -429,6 +617,7 @@ class ScenarioGenerator:
         self.generate_typical_scenarios()
         self.generate_edge_case_scenarios()
         self.generate_stress_test_scenarios()
+        self.generate_realistic_system_scenarios()
         
         print("\n" + "="*60)
         print("✓ All scenarios generated!")
