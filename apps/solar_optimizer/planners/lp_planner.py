@@ -47,7 +47,8 @@ class LinearProgrammingPlanner(BasePlanner):
             4. Mode exclusivity: Only one mode active per slot
     """
     
-    def __init__(self):
+    def __init__(self, charge_efficiency=None, discharge_efficiency=None, min_profit_margin=None):
+        super().__init__(charge_efficiency, discharge_efficiency, min_profit_margin)
         self.solver = PULP_CBC_CMD(msg=0)  # Silent solver
     
     def log(self, message: str):
@@ -160,9 +161,9 @@ class LinearProgrammingPlanner(BasePlanner):
         prob += soc[0] == battery_soc, "Initial_SOC"
         
         # 2. Energy balance for each slot
-        # Round-trip efficiency: ~95% charge, ~95% discharge (90% combined)
-        charge_efficiency = 0.95  # AC → battery: 5% loss
-        discharge_efficiency = 0.95  # Battery → AC: 5% loss
+        # Round-trip efficiency from base class settings
+        charge_efficiency = self.charge_efficiency
+        discharge_efficiency = self.discharge_efficiency
         
         for t in range(n_slots):
             solar_kw = solar_forecast[t]['kw']

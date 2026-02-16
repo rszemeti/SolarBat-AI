@@ -150,9 +150,8 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.5, 2.0, 3.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 30.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": ">3",
                     "discharge_during_peak": True,
-                    "notes": "Winter solar surplus requires Feed-in Priority; should also discharge during expensive evening peak"
+                    "notes": "With natural drain + pre-sunrise discharge, battery may have enough space without Feed-in Priority"
                 }
             },
             
@@ -408,9 +407,8 @@ class ScenarioGenerator:
                 "load_profile": self.generate_load_profile(0.3, 1.5, 2.5),
                 "pricing": self.generate_pricing_profile(12.0, 18.0, 28.0, 15.0),
                 "expected_outcomes": {
-                    "feed_in_priority_hours": ">8",
                     "work_with_limits": True,
-                    "notes": "Must work with tiny battery capacity"
+                    "notes": "Tiny battery drains fast naturally - feed-in priority depends on remaining headroom"
                 }
             }
         ]

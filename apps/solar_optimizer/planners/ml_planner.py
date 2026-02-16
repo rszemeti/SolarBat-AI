@@ -47,7 +47,8 @@ class MLPlanner(BasePlanner):
     - Target SOC levels
     """
     
-    def __init__(self, model_dir: str = "./models"):
+    def __init__(self, model_dir: str = "./models", charge_efficiency=None, discharge_efficiency=None, min_profit_margin=None):
+        super().__init__(charge_efficiency, discharge_efficiency, min_profit_margin)
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
         
@@ -105,7 +106,7 @@ class MLPlanner(BasePlanner):
         peak_price = pricing.get('peak_avg_p', 28.0)
         price_spread = peak_price - overnight_price
         export_price = pricing.get('export_fixed_p', 15.0)
-        arbitrage_margin = (peak_price * 0.90) - overnight_price  # 90% round-trip efficiency
+        arbitrage_margin = (peak_price * self.round_trip_efficiency) - overnight_price
         
         features = np.array([
             # Battery (3)
@@ -510,13 +511,21 @@ class MLPlanner(BasePlanner):
         
         # Get ML-guided strategy decisions
         feed_in_strategy = self._ml_guided_feed_in_strategy(
-            slots, current_soc, battery_capacity, ml_prediction
+            slots, current_soc, battery_capacity, ml_prediction, max_charge_rate
         )
         
         presunrise_strategy = self._ml_guided_presunrise_discharge(
             slots, current_soc, battery_capacity, max_discharge_rate, 
             feed_in_strategy, ml_prediction
         )
+        
+        # Re-run feed-in with post-discharge SOC if pre-sunrise will happen
+        if presunrise_strategy['use_strategy']:
+            post_discharge_soc = presunrise_strategy['target_soc']
+            if post_discharge_soc != current_soc:
+                feed_in_strategy = self._ml_guided_feed_in_strategy(
+                    slots, post_discharge_soc, battery_capacity, ml_prediction, max_charge_rate
+                )
         
         if feed_in_strategy['use_strategy']:
             self.log(f"📊 ML-GUIDED Feed-in Priority: {feed_in_strategy['start_time'].strftime('%H:%M')}-{feed_in_strategy['end_time'].strftime('%H:%M')}")
@@ -526,12 +535,27 @@ class MLPlanner(BasePlanner):
             self.log(f"🌅 ML-GUIDED Pre-sunrise Discharge: {presunrise_strategy['start_time'].strftime('%H:%M')}-{presunrise_strategy['end_time'].strftime('%H:%M')}")
             self.log(f"   Target: {presunrise_strategy['target_soc']:.0f}% SOC")
         
+        # Create physics model for simulation
+        from .inverter_physics import InverterPhysics
+        physics = InverterPhysics(
+            battery_capacity=battery_capacity,
+            max_charge_rate=max_charge_rate,
+            max_discharge_rate=max_discharge_rate,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
+            export_limit=5.0,
+            min_soc=min_soc,
+            max_soc=max_soc
+        )
+        
         # Optimize each slot
         cumulative_cost = 0.0
         
         for i, slot in enumerate(slots):
-            solar_kwh = slot['solar_kw'] * 0.5
-            load_kwh = slot['load_kw'] * 0.5
+            solar_kw = slot['solar_kw']
+            load_kw = slot['load_kw']
+            solar_kwh = solar_kw * 0.5
+            load_kwh = load_kw * 0.5
             import_price = slot['import_price']
             
             # Future lookahead
@@ -541,8 +565,8 @@ class MLPlanner(BasePlanner):
             future_solar_surplus = self._calculate_future_solar_surplus(slots[i:])
             future_min_price = min((s['import_price'] for s in slots[i:]), default=import_price)
             
-            # Decide mode with ML guidance
-            mode, action, soc_change = self._decide_mode_ml_guided(
+            # Decide mode with ML guidance (mode decision only)
+            mode, _action, _soc_change = self._decide_mode_ml_guided(
                 slot=slot,
                 feed_in_strategy=feed_in_strategy,
                 presunrise_strategy=presunrise_strategy,
@@ -561,11 +585,24 @@ class MLPlanner(BasePlanner):
                 max_soc=max_soc
             )
             
-            # Apply SOC change
-            new_soc = max(min_soc, min(max_soc, current_soc + soc_change))
+            # Use physics model for actual simulation
+            target_soc = presunrise_strategy.get('target_soc') if mode == 'Force Discharge' and presunrise_strategy.get('use_strategy') else None
             
-            # Calculate cost
-            cost_impact = 0.0  # Simplified for now
+            if mode == 'Feed-in Priority':
+                result = physics.simulate_feed_in_priority(solar_kw, load_kw, current_soc, import_price, export_price)
+            elif mode == 'Force Charge':
+                result = physics.simulate_force_charge(solar_kw, load_kw, current_soc, max_charge_rate, import_price, export_price)
+            elif mode == 'Force Discharge':
+                result = physics.simulate_force_discharge(solar_kw, load_kw, current_soc, max_discharge_rate, import_price, export_price, target_soc=target_soc)
+            else:  # Self Use
+                result = physics.simulate_self_use(solar_kw, load_kw, current_soc, import_price, export_price)
+            
+            # Apply result
+            action = result.action
+            soc_change = result.soc_change
+            new_soc = max(min_soc, min(max_soc, current_soc + soc_change))
+            cost_impact = result.cost_pence
+            
             cumulative_cost += cost_impact
             
             plan.append({
@@ -622,83 +659,236 @@ class MLPlanner(BasePlanner):
         
         return slots
     
-    def _ml_guided_feed_in_strategy(self, slots, current_soc, battery_capacity, ml_prediction):
-        """Use ML predictions to decide Feed-in Priority strategy"""
+    def _ml_guided_feed_in_strategy(self, slots, current_soc, battery_capacity, ml_prediction, max_charge_rate=None):
+        """Use ML to decide IF to use Feed-in Priority, but physics-based backwards
+        simulation to determine WHEN to transition to Self-Use.
+        
+        The ML model predicts whether feed-in is beneficial, but the actual
+        transition timing must come from physics to ensure battery fills by end of solar.
+        """
         
         if not ml_prediction['use_feed_in_priority']:
             return {'use_strategy': False, 'reason': 'ML predicts no Feed-in Priority needed'}
         
-        # Use ML-predicted hours to set window
-        predicted_hours = ml_prediction['feed_in_hours']
-        
         # Find solar window
-        now = slots[0]['time'] if slots else datetime.now()
-        sunrise_time = None
-        sunset_time = None
+        fi_start_idx = None
+        fi_solar_end_idx = None
         
-        for slot in slots:
-            if slot['solar_kw'] > 0.5 and sunrise_time is None:
-                sunrise_time = slot['time']
-            if slot['solar_kw'] > 0.5:
-                sunset_time = slot['time']
+        for i, slot in enumerate(slots):
+            if slot.get('solar_kw', 0) > 0.5:
+                if fi_start_idx is None:
+                    fi_start_idx = i
+                fi_solar_end_idx = i
         
-        if not sunrise_time:
+        if fi_start_idx is None or fi_solar_end_idx is None:
             return {'use_strategy': False, 'reason': 'No solar detected'}
         
-        # Calculate end time based on ML prediction
-        predicted_duration = timedelta(hours=predicted_hours)
-        end_time = min(sunrise_time + predicted_duration, sunset_time)
+        max_soc = 95.0
+        max_charge_rate_kw = max_charge_rate if max_charge_rate else battery_capacity / 4
+        export_limit = 5.0
+        
+        # ── Forward sim in Self-Use to check if clipping occurs ──
+        su_soc = current_soc
+        su_clipped = 0
+        su_full_at_idx = None
+        
+        for i in range(fi_start_idx, fi_solar_end_idx + 1):
+            slot = slots[i]
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            net_solar = max(0, solar_kw - load_kw)
+            
+            headroom = max(0, (max_soc - su_soc) / 100 * battery_capacity)
+            charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5, headroom)
+            remaining = net_solar - charge_kwh * 2
+            grid_kw = min(remaining, export_limit)
+            clip = max(0, remaining - export_limit) * 0.5
+            
+            su_soc = min(max_soc, su_soc + (charge_kwh / battery_capacity) * 100)
+            su_clipped += clip
+            
+            if solar_kw < load_kw:
+                drain = min((load_kw - solar_kw) * 0.5, (su_soc - 10) / 100 * battery_capacity)
+                su_soc = max(10, su_soc - (drain / battery_capacity) * 100)
+            
+            if su_soc >= max_soc and su_full_at_idx is None and net_solar > 0.5:
+                su_full_at_idx = i
+        
+        if su_clipped < 2.0:
+            return {'use_strategy': False, 'reason': f'ML suggested feed-in but only {su_clipped:.1f}kWh clipping'}
+        
+        # ── Backwards simulation to find transition point ──
+        backward_soc = max_soc
+        transition_idx = fi_start_idx
+        
+        for i in range(fi_solar_end_idx, fi_start_idx - 1, -1):
+            slot = slots[i]
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            net_solar = solar_kw - load_kw
+            
+            if net_solar > 0:
+                charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5)
+                soc_change = (charge_kwh / battery_capacity) * 100
+                potential_soc = backward_soc - soc_change
+                
+                if potential_soc < current_soc:
+                    transition_idx = i
+                    break
+                backward_soc = potential_soc
+            else:
+                drain_kwh = abs(net_solar) * 0.5
+                soc_change = (drain_kwh / battery_capacity) * 100
+                backward_soc = min(max_soc, backward_soc + soc_change)
+            
+            transition_idx = i
+        
+        # ── Validate with forward sim ──
+        fi_soc = current_soc
+        fi_clipped = 0
+        fi_full_at_idx = None
+        
+        for i in range(fi_start_idx, fi_solar_end_idx + 1):
+            slot = slots[i]
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            
+            if i < transition_idx:
+                grid_kw = min(solar_kw, export_limit)
+                after_grid = solar_kw - grid_kw
+                load_from_solar = min(after_grid, load_kw)
+                after_load = after_grid - load_from_solar
+                headroom = max(0, (max_soc - fi_soc) / 100 * battery_capacity)
+                charge_kwh = min(after_load * 0.5, max_charge_rate_kw * 0.5, headroom)
+                fi_soc = min(max_soc, fi_soc + (charge_kwh / battery_capacity) * 100)
+                fi_clipped += max(0, after_load * 0.5 - charge_kwh)
+                if load_from_solar < load_kw:
+                    drain = min((load_kw - load_from_solar) * 0.5, (fi_soc - 10) / 100 * battery_capacity)
+                    fi_soc = max(10, fi_soc - (drain / battery_capacity) * 100)
+            else:
+                net_solar = max(0, solar_kw - load_kw)
+                headroom = max(0, (max_soc - fi_soc) / 100 * battery_capacity)
+                charge_kwh = min(net_solar * 0.5, max_charge_rate_kw * 0.5, headroom)
+                remaining = net_solar - charge_kwh * 2
+                fi_clipped += max(0, remaining - export_limit) * 0.5
+                fi_soc = min(max_soc, fi_soc + (charge_kwh / battery_capacity) * 100)
+                if solar_kw < load_kw:
+                    drain = min((load_kw - solar_kw) * 0.5, (fi_soc - 10) / 100 * battery_capacity)
+                    fi_soc = max(10, fi_soc - (drain / battery_capacity) * 100)
+            
+            if fi_soc >= max_soc and fi_full_at_idx is None:
+                fi_full_at_idx = i
+        
+        clip_saved = su_clipped - fi_clipped
+        if clip_saved < 2.0:
+            return {'use_strategy': False, 'reason': f'Feed-in only saves {clip_saved:.1f}kWh'}
+        
+        start_time = slots[fi_start_idx]['time']
+        transition_time = slots[transition_idx]['time']
+        su_full_time = slots[su_full_at_idx]['time'].strftime('%H:%M') if su_full_at_idx else 'never'
+        fi_full_time = slots[fi_full_at_idx]['time'].strftime('%H:%M') if fi_full_at_idx else 'never'
         
         return {
             'use_strategy': True,
-            'start_time': sunrise_time,
-            'end_time': end_time,
-            'reason': f"ML-predicted {predicted_hours:.1f}h Feed-in Priority window"
+            'start_time': start_time,
+            'end_time': transition_time,
+            'reason': (f"ML+physics: saves {clip_saved:.1f}kWh, "
+                      f"full at {su_full_time} (Self-Use) vs {fi_full_time} (Feed-in)")
         }
     
     def _ml_guided_presunrise_discharge(self, slots, current_soc, battery_capacity, 
                                        max_discharge_rate, feed_in_strategy, ml_prediction):
-        """Use ML to guide pre-sunrise discharge decisions"""
+        """Use ML to guide pre-sunrise discharge decisions.
         
-        # Simple heuristic for now (can be ML-enhanced later)
+        Accounts for natural Self-Use drain before sunrise and starts
+        forced discharge as LATE as possible.
+        """
+        import math
+        
         now = slots[0]['time'] if slots else datetime.now()
         
         # Find sunrise
         sunrise_time = None
-        for slot in slots:
+        sunrise_slot_idx = None
+        for i, slot in enumerate(slots):
             if slot['solar_kw'] > 0.5:
                 sunrise_time = slot['time']
+                sunrise_slot_idx = i
                 break
         
         if not sunrise_time:
             return {'use_strategy': False, 'reason': 'No sunrise detected'}
         
-        # Calculate if we need discharge
-        total_solar = sum(slot['solar_kw'] * 0.5 for slot in slots if slot['time'] >= sunrise_time)
-        total_load = sum(slot['load_kw'] * 0.5 for slot in slots if slot['time'] >= sunrise_time)
-        net_surplus = total_solar - total_load
+        # Step 1: Calculate battery absorption during solar hours
+        export_limit = 5.0
+        battery_absorption_kwh = 0
         
-        battery_headroom = ((95 - current_soc) / 100) * battery_capacity
+        for slot in slots:
+            solar_kw = slot.get('solar_kw', 0)
+            load_kw = slot.get('load_kw', 0)
+            if solar_kw < 0.5:
+                continue
+            
+            if feed_in_strategy['use_strategy']:
+                slot_time = slot['time']
+                if feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']:
+                    after_grid = max(0, solar_kw - export_limit)
+                    after_load = max(0, after_grid - load_kw)
+                    battery_absorption_kwh += after_load * 0.5
+                else:
+                    net = max(0, solar_kw - load_kw)
+                    battery_absorption_kwh += net * 0.5
+            else:
+                net = max(0, solar_kw - load_kw)
+                battery_absorption_kwh += net * 0.5
         
-        if net_surplus <= battery_headroom + 2.0:
-            return {'use_strategy': False, 'reason': 'Sufficient battery space'}
+        # Step 2: Forward-simulate natural drain to sunrise
+        soc_at_sunrise = current_soc
+        for i in range(sunrise_slot_idx):
+            load_kw = slots[i].get('load_kw', 0)
+            solar_kw = slots[i].get('solar_kw', 0)
+            net_drain = max(0, load_kw - solar_kw)
+            drain_kwh = net_drain * 0.5
+            soc_drop = (drain_kwh / battery_capacity) * 100
+            soc_at_sunrise = max(15.0, soc_at_sunrise - soc_drop)
         
-        # Need to discharge
-        target_soc = max(15.0, 95 - (net_surplus / battery_capacity * 100))
-        discharge_needed = ((current_soc - target_soc) / 100) * battery_capacity
-        discharge_hours = discharge_needed / max_discharge_rate
+        # Step 3: Check if we need forced discharge
+        space_at_sunrise_kwh = ((95 - soc_at_sunrise) / 100) * battery_capacity
+        space_shortfall = battery_absorption_kwh - space_at_sunrise_kwh
         
-        discharge_start = sunrise_time - timedelta(hours=discharge_hours)
-        if discharge_start <= now:
-            discharge_start = now
+        if space_shortfall <= 1.0:
+            return {'use_strategy': False, 'reason': f'Sufficient space at sunrise ({space_at_sunrise_kwh:.1f}kWh)'}
+        
+        # Step 4: Calculate target and forced discharge amount
+        needed_discharge_kwh = space_shortfall + 2.0
+        max_discharge_kwh = ((soc_at_sunrise - 15.0) / 100) * battery_capacity
+        actual_discharge_kwh = min(needed_discharge_kwh, max_discharge_kwh)
+        target_soc = max(15.0, soc_at_sunrise - (actual_discharge_kwh / battery_capacity * 100))
+        
+        forced_discharge_kwh = ((soc_at_sunrise - target_soc) / 100) * battery_capacity
+        if forced_discharge_kwh < 0.5:
+            return {'use_strategy': False, 'reason': f'Minimal forced discharge needed'}
+        
+        # Step 5: Start as LATE as possible before sunrise
+        discharge_hours = forced_discharge_kwh / max_discharge_rate
+        discharge_slots_needed = math.ceil(discharge_hours * 2) + 1
+        
+        if sunrise_slot_idx < discharge_slots_needed:
+            return {'use_strategy': False, 'reason': 'Not enough time before sunrise'}
+        
+        discharge_start_idx = sunrise_slot_idx - discharge_slots_needed
+        discharge_start_time = slots[discharge_start_idx]['time']
+        
+        if discharge_start_time <= now:
+            discharge_start_time = now
         
         return {
             'use_strategy': True,
-            'start_time': discharge_start,
+            'start_time': discharge_start_time,
             'end_time': sunrise_time,
             'target_soc': target_soc,
             'discharge_rate': max_discharge_rate,
-            'reason': f"ML-guided pre-sunrise discharge to create {net_surplus:.1f}kWh space"
+            'reason': f"ML-guided pre-sunrise: SOC at sunrise ~{soc_at_sunrise:.0f}%, force to {target_soc:.0f}% ({forced_discharge_kwh:.1f}kWh)"
         }
     
     def _calculate_future_deficit(self, future_slots, current_soc, battery_capacity, min_soc):
@@ -735,15 +925,16 @@ class MLPlanner(BasePlanner):
                               min_soc, max_soc):
         """Decide mode using ML-guided strategies"""
         
-        # Round-trip efficiency constants
-        round_trip_efficiency = 0.85
-        min_profit_margin = 2.0  # pence per kWh
+        # Round-trip efficiency from base class settings
+        round_trip_efficiency = self.round_trip_efficiency
+        min_profit_margin = self.min_profit_margin
         
-        # Pre-sunrise discharge
+        # Pre-sunrise discharge - stop if already at target
         if presunrise_strategy['use_strategy']:
             slot_time = slot['time']
-            if (presunrise_strategy['start_time'] <= slot_time < presunrise_strategy['end_time']):
-                target_soc = presunrise_strategy['target_soc']
+            target_soc = presunrise_strategy['target_soc']
+            if (presunrise_strategy['start_time'] <= slot_time < presunrise_strategy['end_time']
+                and current_soc > target_soc + 1.0):
                 soc_deficit = current_soc - target_soc
                 max_discharge_kwh = (soc_deficit / 100) * battery_capacity
                 discharge_kwh = min(max_discharge_rate * 0.5, max_discharge_kwh)
@@ -802,8 +993,12 @@ class MLPlanner(BasePlanner):
             soc_change = -(discharge_kwh / battery_capacity) * 100
             return 'Force Discharge', f"Profitable export: {discharge_profit:.1f}p/kWh after losses", soc_change
         
-        # Default: Self-Use
-        return 'Self Use', "Self-use mode", 0
+        # Default: Self-Use - battery serves household load
+        # SOC drains from net load (load minus any solar)
+        net_load = max(0, load_kwh - solar_kwh)  # kwh per 30-min slot
+        drain_kwh = min(net_load, (current_soc - min_soc) / 100 * battery_capacity)
+        soc_change = -(drain_kwh / battery_capacity) * 100
+        return 'Self Use', f"Load {load_kwh:.2f}kWh > Solar {solar_kwh:.2f}kWh, using battery" if net_load > 0 else "Self-use mode", soc_change
 
 
 # Example usage

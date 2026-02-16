@@ -17,6 +17,7 @@ Usage:
 """
 
 from .base_planner import BasePlanner
+from .inverter_physics import InverterPhysics
 from .rule_based_planner import RuleBasedPlanner
 
 # Optional planners (may require dependencies)

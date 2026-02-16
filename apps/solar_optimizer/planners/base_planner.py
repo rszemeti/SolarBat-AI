@@ -18,6 +18,21 @@ class BasePlanner(ABC):
     to ensure consistent behavior and interchangeability.
     """
     
+    # ── Battery efficiency defaults ──
+    # These can be overridden via system_state['capabilities'] or constructor
+    DEFAULT_CHARGE_EFFICIENCY = 0.95      # AC → battery: 5% loss
+    DEFAULT_DISCHARGE_EFFICIENCY = 0.95   # Battery → AC: 5% loss
+    # Round-trip = charge × discharge = 0.95 × 0.95 = 0.9025 ≈ 90%
+    
+    # Arbitrage thresholds
+    DEFAULT_MIN_PROFIT_MARGIN = 2.0       # pence per kWh minimum profit after losses
+    
+    def __init__(self, charge_efficiency=None, discharge_efficiency=None, min_profit_margin=None):
+        self.charge_efficiency = charge_efficiency or self.DEFAULT_CHARGE_EFFICIENCY
+        self.discharge_efficiency = discharge_efficiency or self.DEFAULT_DISCHARGE_EFFICIENCY
+        self.min_profit_margin = min_profit_margin or self.DEFAULT_MIN_PROFIT_MARGIN
+        self.round_trip_efficiency = self.charge_efficiency * self.discharge_efficiency
+    
     @abstractmethod
     def create_plan(self,
                    import_prices: List[Dict],

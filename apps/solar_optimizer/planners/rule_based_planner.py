@@ -37,8 +37,9 @@ class RuleBasedPlanner(BasePlanner):
     All data comes from providers.
     """
     
-    def __init__(self):
-        """Initialize plan creator (stateless)"""
+    def __init__(self, charge_efficiency=None, discharge_efficiency=None, min_profit_margin=None):
+        """Initialize plan creator with optional efficiency overrides"""
+        super().__init__(charge_efficiency, discharge_efficiency, min_profit_margin)
         self.log_func = print
     
     def log(self, message: str, level: str = "INFO"):
@@ -204,13 +205,28 @@ class RuleBasedPlanner(BasePlanner):
             self.log(f"   Target: {presunrise_discharge_strategy['target_soc']:.0f}% SOC")
             self.log(f"   Reason: {presunrise_discharge_strategy['reason']}")
         
+        # Create physics model for simulation
+        from .inverter_physics import InverterPhysics
+        physics = InverterPhysics(
+            battery_capacity=battery_capacity,
+            max_charge_rate=max_charge_rate,
+            max_discharge_rate=max_discharge_rate,
+            charge_efficiency=self.charge_efficiency,
+            discharge_efficiency=self.discharge_efficiency,
+            export_limit=5.0,
+            min_soc=min_soc,
+            max_soc=max_soc
+        )
+        
         for i, slot in enumerate(slots):
             # Store future slots for clipping analysis
             self._future_slots = slots[i:]
             
             # Calculate energy balance for this slot
-            solar_kwh = slot['solar_kw'] * 0.5  # 30 minutes
-            load_kwh = slot['load_kw'] * 0.5
+            solar_kw = slot['solar_kw']
+            load_kw = slot['load_kw']
+            solar_kwh = solar_kw * 0.5  # 30 minutes
+            load_kwh = load_kw * 0.5
             import_price = slot['import_price']
             
             # Look ahead to make smart decisions
@@ -220,8 +236,8 @@ class RuleBasedPlanner(BasePlanner):
             future_solar_surplus = self._calculate_future_solar_surplus(slots[i:])
             future_min_price = min((s['import_price'] for s in slots[i:]), default=import_price)
             
-            # Decide mode
-            mode, action, soc_change = self._decide_mode(
+            # Decide mode (strategy decision only)
+            mode, _action, _soc_change = self._decide_mode(
                 slot=slot,
                 feed_in_priority_strategy=feed_in_priority_strategy,
                 presunrise_discharge_strategy=presunrise_discharge_strategy,
@@ -240,19 +256,23 @@ class RuleBasedPlanner(BasePlanner):
                 max_soc=max_soc
             )
             
-            # Update SOC
-            new_soc = max(min_soc, min(max_soc, current_soc + soc_change))
+            # Use physics model for actual simulation
+            target_soc = presunrise_discharge_strategy.get('target_soc') if mode == 'Force Discharge' and presunrise_discharge_strategy.get('use_strategy') else None
             
-            # Calculate cost for this slot
-            slot_cost = self._calculate_slot_cost(
-                mode=mode,
-                soc_change=soc_change,
-                solar_kwh=solar_kwh,
-                load_kwh=load_kwh,
-                import_price=import_price,
-                export_price=export_price,
-                battery_capacity=battery_capacity
-            )
+            if mode == 'Feed-in Priority':
+                result = physics.simulate_feed_in_priority(solar_kw, load_kw, current_soc, import_price, export_price)
+            elif mode == 'Force Charge':
+                result = physics.simulate_force_charge(solar_kw, load_kw, current_soc, max_charge_rate, import_price, export_price)
+            elif mode == 'Force Discharge':
+                result = physics.simulate_force_discharge(solar_kw, load_kw, current_soc, max_discharge_rate, import_price, export_price, target_soc=target_soc)
+            else:  # Self Use
+                result = physics.simulate_self_use(solar_kw, load_kw, current_soc, import_price, export_price)
+            
+            # Apply physics result
+            action = result.action
+            soc_change = result.soc_change
+            new_soc = max(min_soc, min(max_soc, current_soc + soc_change))
+            slot_cost = result.cost_pence
             
             plan.append({
                 'time': slot['time'],
@@ -500,40 +520,30 @@ class RuleBasedPlanner(BasePlanner):
         """
         Pre-sunrise discharge strategy: Create battery space BEFORE solar arrives.
         
-        Used when even Feed-in Priority all day won't prevent clipping.
-        Works backwards from sunrise to calculate how much to discharge.
-        
-        Logic:
-        1. Calculate total solar surplus (after load and Feed-in Priority)
-        2. Calculate current battery space
-        3. If surplus > space, we need to discharge before sunrise
-        4. Work backwards from sunrise to find discharge window
-        
-        Returns:
-            Dict with:
-                - use_strategy: bool
-                - start_time: datetime (when to start discharging)
-                - end_time: datetime (when to stop - at sunrise)
-                - target_soc: float (what SOC to reach)
-                - discharge_rate: float (kW to discharge at)
-                - reason: str
+        Approach:
+        1. Calculate how much battery will absorb during the day
+        2. Forward-simulate natural Self-Use drain from now until sunrise
+        3. Calculate SOC at sunrise (accounting for natural drain)
+        4. Determine target SOC and how much forced discharge is needed
+        5. Work BACKWARDS from sunrise to place forced discharge as LATE as possible
         """
+        import math
+        
         now = slots[0]['time'] if slots else datetime.now()
         
         # Find sunrise (first slot with solar > 0.5kW)
         sunrise_time = None
-        for slot in slots:
+        sunrise_slot_idx = None
+        for i, slot in enumerate(slots):
             if slot.get('solar_kw', 0) > 0.5:
                 sunrise_time = slot['time']
+                sunrise_slot_idx = i
                 break
         
         if not sunrise_time or sunrise_time <= now:
             return {'use_strategy': False, 'reason': 'No sunrise time found or already past'}
         
-        # Calculate how much the battery will actually absorb
-        # In Feed-in Priority: grid gets first 5kW, load from remainder, battery gets overflow
-        # In Self-Use: battery gets first, grid gets overflow
-        # We need space for what the battery will actually receive, not total solar
+        # ── Step 1: Calculate how much battery will absorb during solar hours ──
         export_limit = 5.0
         battery_absorption_kwh = 0
         
@@ -547,55 +557,55 @@ class RuleBasedPlanner(BasePlanner):
             if feed_in_strategy['use_strategy']:
                 slot_time = slot['time']
                 if feed_in_strategy['start_time'] <= slot_time <= feed_in_strategy['end_time']:
-                    # Feed-in Priority: grid gets 5kW first, then load, battery gets rest
                     after_grid = max(0, solar_kw - export_limit)
                     after_load = max(0, after_grid - load_kw)
                     battery_absorption_kwh += after_load * 0.5
                 else:
-                    # Self-Use slots: battery gets solar - load
                     net = max(0, solar_kw - load_kw)
                     battery_absorption_kwh += net * 0.5
             else:
-                # All Self-Use: battery gets solar - load
                 net = max(0, solar_kw - load_kw)
                 battery_absorption_kwh += net * 0.5
         
-        # Calculate current battery space (current to 95%)
-        current_space_kwh = ((95 - current_soc) / 100) * battery_capacity
+        # ── Step 2: Forward-simulate natural drain from now to sunrise ──
+        # The battery will lose charge naturally through household load
+        soc_at_sunrise = current_soc
+        for i in range(sunrise_slot_idx):
+            load_kw = slots[i].get('load_kw', 0)
+            solar_kw = slots[i].get('solar_kw', 0)
+            net_drain = max(0, load_kw - solar_kw)  # Only drain if load > solar
+            drain_kwh = net_drain * 0.5  # 30-min slot
+            soc_drop = (drain_kwh / battery_capacity) * 100
+            soc_at_sunrise = max(15.0, soc_at_sunrise - soc_drop)
         
-        # Do we need to create more space?
-        space_shortfall = battery_absorption_kwh - current_space_kwh
+        # ── Step 3: Calculate space at sunrise vs what's needed ──
+        space_at_sunrise_kwh = ((95 - soc_at_sunrise) / 100) * battery_capacity
+        space_shortfall = battery_absorption_kwh - space_at_sunrise_kwh
         
-        if space_shortfall <= 1.0:  # 1kWh margin
-            return {'use_strategy': False, 'reason': f'Sufficient space: {current_space_kwh:.1f}kWh available for {battery_absorption_kwh:.1f}kWh absorption'}
+        if space_shortfall <= 1.0:
+            return {'use_strategy': False, 
+                    'reason': f'Sufficient space at sunrise: {space_at_sunrise_kwh:.1f}kWh available '
+                              f'(SOC will be {soc_at_sunrise:.0f}% naturally) for {battery_absorption_kwh:.1f}kWh absorption'}
         
-        # Calculate target SOC - only discharge what we need + small buffer
-        # We already have current_space_kwh, we only need space_shortfall more
+        # ── Step 4: Calculate target SOC and forced discharge needed ──
         needed_discharge_kwh = space_shortfall + 2.0  # 2kWh buffer
-        # Don't discharge below 15% SOC
-        max_discharge_kwh = ((current_soc - 15.0) / 100) * battery_capacity
+        max_discharge_kwh = ((soc_at_sunrise - 15.0) / 100) * battery_capacity
         actual_discharge_kwh = min(needed_discharge_kwh, max_discharge_kwh)
-        target_soc = max(15.0, current_soc - (actual_discharge_kwh / battery_capacity * 100))
+        target_soc = max(15.0, soc_at_sunrise - (actual_discharge_kwh / battery_capacity * 100))
         
-        discharge_needed_kwh = ((current_soc - target_soc) / 100) * battery_capacity
+        forced_discharge_kwh = ((soc_at_sunrise - target_soc) / 100) * battery_capacity
         
-        # Calculate discharge window
-        # Work backwards from sunrise
-        # Discharge at max rate to minimize time
-        discharge_hours = discharge_needed_kwh / max_discharge_rate
-        discharge_slots = int(discharge_hours * 2)  # 30-min slots
+        if forced_discharge_kwh < 0.5:
+            return {'use_strategy': False, 'reason': f'Minimal forced discharge needed ({forced_discharge_kwh:.1f}kWh)'}
         
-        # Find discharge start time (working backwards from sunrise)
-        sunrise_slot_idx = None
-        for i, slot in enumerate(slots):
-            if slot['time'] >= sunrise_time:
-                sunrise_slot_idx = i
-                break
+        # ── Step 5: Work BACKWARDS from sunrise - start as LATE as possible ──
+        discharge_hours = forced_discharge_kwh / max_discharge_rate
+        discharge_slots_needed = math.ceil(discharge_hours * 2) + 1  # +1 buffer
         
-        if sunrise_slot_idx is None or sunrise_slot_idx < discharge_slots:
+        if sunrise_slot_idx < discharge_slots_needed:
             return {'use_strategy': False, 'reason': 'Not enough time before sunrise'}
         
-        discharge_start_idx = sunrise_slot_idx - discharge_slots
+        discharge_start_idx = sunrise_slot_idx - discharge_slots_needed
         discharge_start_time = slots[discharge_start_idx]['time']
         
         # Make sure discharge starts after current time
@@ -608,7 +618,10 @@ class RuleBasedPlanner(BasePlanner):
             'end_time': sunrise_time,
             'target_soc': target_soc,
             'discharge_rate': max_discharge_rate,
-            'reason': f"Pre-sunrise discharge: {space_shortfall:.1f}kWh space needed, discharging from {current_soc:.0f}% to {target_soc:.0f}% ({discharge_needed_kwh:.1f}kWh) before sunrise at {sunrise_time.strftime('%H:%M')}"
+            'reason': (f"Pre-sunrise discharge: {space_shortfall:.1f}kWh space needed, "
+                      f"SOC at sunrise naturally {soc_at_sunrise:.0f}%, "
+                      f"force discharge to {target_soc:.0f}% ({forced_discharge_kwh:.1f}kWh) "
+                      f"before sunrise at {sunrise_time.strftime('%H:%M')}")
         }
     
     def _align_forecasts(self, prices, solar_forecast, load_forecast) -> List[Dict]:
@@ -712,10 +725,12 @@ class RuleBasedPlanner(BasePlanner):
         # Check if this slot falls within the pre-sunrise discharge window
         if presunrise_discharge_strategy['use_strategy']:
             slot_time = slot['time']
+            target_soc = presunrise_discharge_strategy['target_soc']
+            
+            # Only discharge if we haven't reached the target yet
             if (presunrise_discharge_strategy['start_time'] <= slot_time < 
-                presunrise_discharge_strategy['end_time']):
+                presunrise_discharge_strategy['end_time'] and current_soc > target_soc + 1.0):
                 mode = 'Force Discharge'
-                target_soc = presunrise_discharge_strategy['target_soc']
                 discharge_rate = presunrise_discharge_strategy['discharge_rate']
                 
                 # Calculate discharge amount (limit to what's needed to reach target)
@@ -760,16 +775,9 @@ class RuleBasedPlanner(BasePlanner):
                 return mode, action, soc_change
         
         # 1. ARBITRAGE OPPORTUNITY: If we can buy cheap and sell expensive later, do it!
-        # Round-trip efficiency is roughly 85-90%:
-        # - Charge efficiency: ~95% (AC → DC → battery)
-        # - Discharge efficiency: ~95% (battery → DC → AC)
-        # - Combined: ~90%, but real-world with inverter standby, BMS etc. closer to 85%
-        # 
-        # Example: Buy 1kWh at 15p, retrieve 0.85kWh, sell at 15p = 12.75p revenue
-        # Loss: 2.25p per kWh stored. Need export > import / 0.85 to break even.
-        # Simplified: export must be at least 20% higher than import to profit.
-        round_trip_efficiency = 0.85
-        min_profit_margin = 2.0  # Minimum 2p/kWh clear profit after losses
+        # Uses charge/discharge efficiency from base class settings
+        round_trip_efficiency = self.round_trip_efficiency
+        min_profit_margin = self.min_profit_margin
         break_even_export = import_price / round_trip_efficiency
         profitable_arbitrage = (export_price > break_even_export + min_profit_margin)
         
@@ -853,13 +861,13 @@ class RuleBasedPlanner(BasePlanner):
         if mode == 'Force Charge':
             # Charging from grid
             battery_kwh = abs(soc_change) / 100 * battery_capacity
-            grid_import_kwh = battery_kwh / 0.95  # Account for charge efficiency
+            grid_import_kwh = battery_kwh / self.charge_efficiency  # Account for charge efficiency
             cost = grid_import_kwh * import_price
             
         elif mode == 'Force Discharge':
             # Discharging to grid
             battery_kwh = abs(soc_change) / 100 * battery_capacity
-            grid_export_kwh = battery_kwh * 0.95  # Account for discharge efficiency
+            grid_export_kwh = battery_kwh * self.discharge_efficiency  # Account for discharge efficiency
             cost = -grid_export_kwh * export_price  # Negative = revenue
             
         else:
