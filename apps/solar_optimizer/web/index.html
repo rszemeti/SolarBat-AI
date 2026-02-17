@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SolarBat-AI Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; margin: 0; background: #f5f5f5; }
+        .loading { text-align: center; padding: 80px 20px; }
+        .loading h1 { color: #2c3e50; font-size: 28px; }
+        .loading p { color: #7f8c8d; font-size: 16px; }
+        .spinner { display: inline-block; width: 40px; height: 40px; border: 4px solid #ecf0f1;
+                   border-top-color: #3498db; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 20px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .error { text-align: center; padding: 60px 20px; }
+        .error h2 { color: #e74c3c; }
+        .error p { color: #555; max-width: 500px; margin: 10px auto; }
+        .error code { background: #ecf0f1; padding: 2px 8px; border-radius: 3px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="content" class="loading">
+        <div class="spinner"></div>
+        <h1>🦇 SolarBat-AI</h1>
+        <p>Loading dashboard...</p>
+    </div>
+    <script>
+        (function() {
+            var baseUrl = window.location.protocol + '//' + window.location.host;
+            var url = baseUrl + '/api/appdaemon/solar_plan';
+
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: '{}'
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data && data.html) {
+                    document.open();
+                    document.write(data.html);
+                    document.close();
+                } else if (data && data.error) {
+                    document.getElementById('content').innerHTML =
+                        '<div class="error"><h2>⚠️ Error</h2><p>' + data.error + '</p></div>';
+                } else {
+                    document.getElementById('content').innerHTML =
+                        '<div class="error"><h2>⏳ No Plan Yet</h2>' +
+                        '<p>The optimizer hasn\'t generated a plan yet. Wait a minute and refresh.</p></div>';
+                }
+            })
+            .catch(function(err) {
+                document.getElementById('content').innerHTML =
+                    '<div class="error"><h2>❌ Connection Error</h2>' +
+                    '<p>' + err.message + '</p>' +
+                    '<p>Make sure the SolarBat-AI addon is running.</p>' +
+                    '<p>Endpoint: <code>' + url + '</code></p></div>';
+            });
+        })();
+    </script>
+</body>
+</html>
