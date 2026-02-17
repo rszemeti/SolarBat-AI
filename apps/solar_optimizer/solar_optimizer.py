@@ -8,7 +8,7 @@ License: MIT
 """
 
 import hassapi as hass
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 import json
 import statistics
 
@@ -778,7 +778,7 @@ class SmartSolarOptimizer(hass.Hass):
                 return None
             
             rates = rates_attr['attributes']['rates']
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             
             upcoming_rates = []
             for r in rates:
