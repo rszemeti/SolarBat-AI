@@ -15,7 +15,6 @@ import os
 import sys
 import json
 from datetime import datetime, timedelta, time, timezone
-from aiohttp import web
 
 import appdaemon.plugins.hass.hassapi as hass
 
@@ -53,9 +52,9 @@ class SmartSolarOptimizer(hass.Hass):
         self._create_sensors()
 
         # Web dashboard
-        self.register_route(self.serve_plan_page, "/solar_plan")
+        self.register_route(self.serve_plan_page, "solar_plan")
         self.register_endpoint(self.save_settings_endpoint, "solar_plan_settings")
-        self.log("[WEB] Dashboard registered at /app/solar_plan")
+        self.log("[WEB] Dashboard at http://<IP>:5050/app/solar_plan")
 
         # Scheduling
         agile_rates = self.config.get("agile_rates")
@@ -323,26 +322,18 @@ class SmartSolarOptimizer(hass.Hass):
 
     # ═══════════════ WEB DASHBOARD ═══════════════
 
-    async def serve_plan_page(self, request, kwargs):
+    def serve_plan_page(self, request, kwargs):
         """Serve HTML dashboard via register_route → /app/solar_plan."""
         try:
             if not self._cached_plan_html:
                 self._cached_plan_html = self._generate_plan_html()
 
             html = self._cached_plan_html
-
-            tab = request.query.get('tab', 'plan') if hasattr(request, 'query') else 'plan'
-            if tab != 'plan':
-                html = html.replace("switchTab('plan')", f"switchTab('{tab}')", 1)
-
-            return web.Response(text=html, content_type='text/html', charset='utf-8')
+            return html, 200
 
         except Exception as e:
             self.log(f"[WEB] Error serving page: {e}", level="ERROR")
-            return web.Response(
-                text=f"<html><body><h1>Error</h1><p>{e}</p></body></html>",
-                content_type='text/html', status=500
-            )
+            return f"<html><body><h1>Error</h1><p>{e}</p></body></html>", 500
 
     async def save_settings_endpoint(self, request, kwargs):
         """POST endpoint to save settings."""
