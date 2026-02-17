@@ -9,6 +9,7 @@ License: MIT
 
 import hassapi as hass
 from datetime import datetime, timedelta, time, timezone
+from aiohttp import web
 import json
 import statistics
 
@@ -490,12 +491,12 @@ class SmartSolarOptimizer(hass.Hass):
                     1  # Only replace the first occurrence (the DOMContentLoaded call won't exist, but harmless)
                 )
             
-            return html, 200
+            return web.Response(text=html, content_type='text/html', charset='utf-8')
             
         except Exception as e:
             self.log(f"[WEB] Error serving plan page: {e}", level="ERROR")
             error_html = f"<html><body><h1>Error generating plan</h1><p>{e}</p></body></html>"
-            return error_html, 500
+            return web.Response(text=error_html, content_type='text/html', status=500)
     
     async def save_settings_endpoint(self, request, kwargs):
         """
