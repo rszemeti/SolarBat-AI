@@ -107,9 +107,10 @@ class SmartSolarOptimizer(hass.Hass):
         
         # Register web endpoints for plan visualization
         # register_route serves raw responses (not JSON-wrapped like register_endpoint)
+        # Accessible at http://<HA_IP>:5050/app/solar_plan
         self.register_route(self.serve_plan_page, "/solar_plan")
         self.register_endpoint(self.save_settings_endpoint, "solar_plan_settings")
-        self.log("[WEB] Dashboard registered at /solar_plan")
+        self.log("[WEB] Dashboard registered at /app/solar_plan")
         
         # Read inverter capabilities on startup
         self.update_inverter_capabilities()
@@ -468,7 +469,7 @@ class SmartSolarOptimizer(hass.Hass):
     
     # ========== WEB ENDPOINT ==========
     
-    async def serve_plan_page(self, request):
+    async def serve_plan_page(self, request, kwargs):
         """
         Serve the plan visualization page.
         Registered as AppDaemon endpoint at /api/appdaemon/solar_plan
