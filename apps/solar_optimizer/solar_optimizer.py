@@ -8,7 +8,7 @@ License: MIT
 """
 
 import hassapi as hass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import json
 import statistics
 
@@ -114,15 +114,15 @@ class SmartSolarOptimizer(hass.Hass):
         self.update_inverter_capabilities()
         
         # Refresh capabilities every hour
-        self.run_hourly(self.update_inverter_capabilities, datetime.now())
+        self.run_hourly(self.update_inverter_capabilities, time(0, 0, 0))
         
         # Schedule tasks - use 30-minute intervals for execution
         self.listen_state(self.on_agile_update, self.agile_rates)
         
         # Execute plan every 30 minutes (aligned to Agile slots)
-        self.run_minutely(self.execute_plan_if_time, 1)
+        self.run_minutely(self.execute_plan_if_time, time(0, 0, 1))
         
-        self.run_hourly(self.record_metrics, datetime.now().replace(minute=55))
+        self.run_hourly(self.record_metrics, time(0, 55, 0))
         self.listen_state(self.check_replan, self.solcast_remaining)
         self.run_daily(self.analyze_history, "02:00:00")
         self.run_daily(self.record_yesterday_actuals, "01:30:00")
