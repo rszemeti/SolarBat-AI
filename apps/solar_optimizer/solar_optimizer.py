@@ -490,12 +490,12 @@ class SmartSolarOptimizer(hass.Hass):
                     1  # Only replace the first occurrence (the DOMContentLoaded call won't exist, but harmless)
                 )
             
-            return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+            return html, 200
             
         except Exception as e:
             self.log(f"[WEB] Error serving plan page: {e}", level="ERROR")
             error_html = f"<html><body><h1>Error generating plan</h1><p>{e}</p></body></html>"
-            return error_html, 500, {'Content-Type': 'text/html'}
+            return error_html, 500
     
     async def save_settings_endpoint(self, request, kwargs):
         """
@@ -530,11 +530,11 @@ class SmartSolarOptimizer(hass.Hass):
             
             self.log(f"[SETTINGS] Updated {len(data)} settings from web UI")
             
-            return json.dumps({'status': 'ok', 'updated': len(data)}), 200, {'Content-Type': 'application/json'}
+            return json.dumps({'status': 'ok', 'updated': len(data)}), 200
             
         except Exception as e:
             self.log(f"[SETTINGS] Error saving: {e}", level="ERROR")
-            return json.dumps({'status': 'error', 'message': str(e)}), 500, {'Content-Type': 'application/json'}
+            return json.dumps({'status': 'error', 'message': str(e)}), 500
     
     def _generate_plan_html(self):
         """Generate full HTML page with all 4 tabs: Plan, Predictions, Accuracy, Settings."""
