@@ -32,8 +32,8 @@ try:
     from sklearn.preprocessing import StandardScaler
     import numpy as np
 except ImportError:
-    print("ERROR: scikit-learn not installed. Run: pip install scikit-learn")
-    sys.exit(1)
+    raise ImportError("scikit-learn not installed. ML planner unavailable. Run: pip install scikit-learn")
+
 
 
 class MLPlanner(BasePlanner):
