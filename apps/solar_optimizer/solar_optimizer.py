@@ -467,7 +467,7 @@ class SmartSolarOptimizer(hass.Hass):
     
     # ========== WEB ENDPOINT ==========
     
-    async def serve_plan_page(self, request):
+    async def serve_plan_page(self, request, kwargs):
         """
         Serve the plan visualization page.
         Registered as AppDaemon endpoint at /api/appdaemon/solar_plan
@@ -497,7 +497,7 @@ class SmartSolarOptimizer(hass.Hass):
             error_html = f"<html><body><h1>Error generating plan</h1><p>{e}</p></body></html>"
             return error_html, 500, {'Content-Type': 'text/html'}
     
-    async def save_settings_endpoint(self, request):
+    async def save_settings_endpoint(self, request, kwargs):
         """
         POST endpoint to save settings from the Settings tab.
         Registered at /api/appdaemon/solar_plan_settings
